@@ -1,0 +1,22 @@
+{
+  "name": "@cue/monorepo",
+  "version": "0.1.0",
+  "description": "Lightweight actor runtime for Node.js — every message is a cue.",
+  "main": "index.js",
+  "private": true,
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "build": "pnpm -r build",
+    "example": "tsx"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "packageManager": "pnpm@10.6.4",
+  "devDependencies": {
+    "@types/jest": "^30.0.0",
+    "jest": "^30.3.0",
+    "ts-jest": "^29.4.6",
+    "tsx": "^4.21.0"
+  }
+}

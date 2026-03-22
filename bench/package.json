@@ -1,0 +1,17 @@
+{
+  "name": "@cue/bench",
+  "version": "0.1.0",
+  "description": "Queue implementation benchmarks",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "bench": "node --expose-gc queue.bench.mjs"
+  },
+  "dependencies": {
+    "@cue/core": "workspace:*",
+    "denque": "^2.1.0"
+  },
+  "devDependencies": {
+    "mitata": "^1.0.34"
+  }
+}
