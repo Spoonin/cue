@@ -22,6 +22,22 @@ you can stop at any phase and already have something real and useful.
 - Bounded mailbox with backpressure (`push → false` when full)
 - Stop signals preempting a draining mailbox
 
+**Supervision strategies (Akka model — strategy lives on the supervisor, not the child):**
+
+| Strategy | Who is affected | Use when |
+|---|---|---|
+| `restartOne` | only the crashed child | children are independent |
+| `restartAll` | all children under this supervisor | children share state or form a pipeline |
+| `restartRest` | crashed child + all spawned after it | downstream actors depend on upstream |
+
+Restart always resets to `initialState` and clears the mailbox. Orphan actors (no supervisor) just stop and log on crash.
+
+`replayLast` (re-enqueue failed message) and `resume` (keep state, drop message) are deferred to a future phase. The infrastructure exists (`Queue.prepend`, `Mailbox.pushFront`) but they are not wired into the supervisor yet.
+
+`Supervisable` interface: both actors and sub-supervisors implement `stop()` and `restart()`, stored in the same `Map<string, Supervisable>` collection.
+
+Imperative spawn API for now. Declarative child spec (for recreating entire tree from config) deferred — see `docs/adr/001-supervisor-init.md`.
+
 **Exit criteria:** You can spawn actors, send messages between them, and observe fair scheduling under load with no infrastructure — one process, one event loop.
 
 ---
@@ -46,6 +62,22 @@ you can stop at any phase and already have something real and useful.
 - Hidden performance cost of inconsistent message shapes
 
 **Exit criteria:** You can profile GC behavior, identify allocation hotspots, and demonstrate the difference between pooled and non-pooled message objects under load.
+
+**Research opportunity — Adaptive Scheduler:**
+Current schedulers (Akka, nact) use a fixed `throughput` value. CPUs solve the same problem dynamically via frequency scaling and branch prediction. An adaptive scheduler could observe its own signals and tune itself:
+- **IO starvation signal** — measure lag between `setImmediate` scheduling and execution; growing lag → reduce throughput
+- **Mailbox depth trend** — queues growing → increase throughput; queues empty → reduce
+- **Message processing time** — slow `fn` → reduce throughput so one actor can't block others
+
+CPU analogy map:
+| CPU technique | Scheduler equivalent |
+|---|---|
+| Dynamic frequency scaling | adaptive throughput |
+| Branch prediction | pre-fetch next actor while current drains |
+| Cache locality | group actors that communicate on same tick |
+| NUMA awareness | Phase 4 — prefer actors on same worker thread |
+
+None of the mainstream actor frameworks implement this. Building and benchmarking it in Cue's `bench/` package would be genuinely novel — the signals are all measurable once the benchmarks exist.
 
 ---
 

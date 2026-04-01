@@ -26,6 +26,14 @@ export class Queue<T> {
     return item;
   }
 
+  // Push to the front — used by Supervisor.replayLast to re-enqueue a failed message.
+  prepend(item: T) {
+    if (this.#size === this.#cap) this.#grow();
+    this.#head = (this.#head - 1 + this.#cap) % this.#cap;
+    this.#buf[this.#head] = item;
+    this.#size++;
+  }
+
   peek(): T | undefined { return this.#size === 0 ? undefined : this.#buf[this.#head]; }
   isEmpty(): boolean { return this.#size === 0; }
   size(): number { return this.#size; }

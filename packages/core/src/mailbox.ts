@@ -28,6 +28,15 @@ export class Mailbox<T> {
         return this.#queue.dequeue();
     }
 
+    // Push to the front — used by Supervisor to replay a failed message.
+    pushFront(item: T): void {
+        this.#queue.prepend(item);
+    }
+
+    clear(): void {
+        this.#queue = new Queue();
+    }
+
     get count(): number {
         return this.#queue.size();
     }

@@ -1,21 +1,8 @@
 import { Mailbox } from "./mailbox.js";
+import { Scheduler } from "./scheduler.js";
+import { ActorFn, ActorOptions, ActorRef, CrashHandler, Drainable, Supervisable } from "./types.js";
 
-export type ActorFn<State, Msg> = (state: State, msg: Msg) => State | Promise<State>;
-
-export interface ActorOptions<State, Msg> {
-    initialState: State;
-    highWatermark?: number;
-    afterMessage?: (state: State) => void;
-}
-
-// The lightweight handle callers hold.
-// This is the "pid" — the only thing that escapes the actor.
-export interface ActorRef<Msg> {
-    readonly id: string
-    send(msg: Msg): boolean
-    trySend(msg: Msg): boolean
-    stop(): void
-}
+export type { ActorFn, ActorOptions, ActorRef, Drainable };
 
 // Auto-incrementing id generator — Phase 1 only.
 // Phase 4: must be globally unique across worker threads.
@@ -24,22 +11,29 @@ function nextId(): string {
     return `actor-${_nextId++}`;
 }
 
-export class Actor<State, Msg> {
+// Default scheduler — used when spawn() is called without one.
+// All actors in the same process share this unless overridden.
+export const defaultScheduler = new Scheduler(100, 16);
+
+export class Actor<State, Msg> implements Drainable, Supervisable {
     readonly id: string;
     readonly ref: ActorRef<Msg>;
+    readonly #initState: State;
     #state: State;
-    #mailbox: Mailbox<Msg>;
-    #fn: ActorFn<State, Msg>;
-    #busy = false;
+    readonly #mailbox: Mailbox<Msg>;
+    readonly #fn: ActorFn<State, Msg>;
+    readonly #scheduler: Scheduler;
     #stopped = false;
-    #afterMessage?: (state: State) => void;
+    readonly #afterMessage?: (state: State) => void;
 
-    constructor(fn: ActorFn<State, Msg>, options: ActorOptions<State, Msg>) {
+    constructor(fn: ActorFn<State, Msg>, options: ActorOptions<State, Msg>, scheduler: Scheduler = defaultScheduler, private readonly crashHandler?: CrashHandler) {
         this.id = nextId();
         this.#fn = fn;
+        this.#initState = options.initialState;
         this.#state = options.initialState;
         this.#mailbox = new Mailbox(options.highWatermark);
         this.#afterMessage = options.afterMessage;
+        this.#scheduler = scheduler;
         this.ref = {
             id: this.id,
             send:    (msg) => this.send(msg),
@@ -47,30 +41,31 @@ export class Actor<State, Msg> {
             stop:    ()    => this.stop(),
         };
     }
+    
+         
+    
+    restart(): void {           
+        this.#stopped = false;
+        this.#state = this.#initState;
+        this.#mailbox.clear();
+        this.#scheduler.enqueue(this);  
+    }
 
     send(msg: Msg): boolean {
-        if(this.#stopped) {
+        if (this.#stopped) {
             throw new Error(`Actor ${this.id} is stopped`);
         }
-
         const result = this.#mailbox.push(msg);
-
-        this.#schedule();
-        
+        this.#scheduler.enqueue(this);
         return result;
     }
 
     trySend(msg: Msg): boolean {
-        if(this.#stopped) {
+        if (this.#stopped) {
             throw new Error(`Actor ${this.id} is stopped`);
         }
-
         const result = this.#mailbox.tryPush(msg);
-        
-        if (result) {
-            this.#schedule();
-        }
-        
+        if (result) this.#scheduler.enqueue(this);
         return result;
     }
 
@@ -90,37 +85,30 @@ export class Actor<State, Msg> {
         return this.#mailbox.count;
     }
 
-    #schedule(): void {
-        if (!this.#busy) {
-            this.#busy = true;
-            setImmediate(() => this.#drain());
-        }
-    }
-
-    async #drain(): Promise<void> {
+    // Called by the Scheduler — processes one message, returns true if more remain.
+    async drain(): Promise<boolean> {
         const msg = this.#mailbox.pull();
-        if (msg === undefined) {
-            this.#busy = false;
-            return;
-        }
-        
+        if (msg === undefined) return false;
+
+        const stateBefore = this.#state;
+
         try {
             const result = this.#fn(this.#state, msg);
             this.#state = result instanceof Promise ? await result : result;
-            
             this.#afterMessage?.(this.#state);
-            
-            if (!this.#mailbox.isEmpty) {
-                setImmediate(() => this.#drain());
-            } else {
-                this.#busy = false;
-            }
         } catch (err) {
-            this.#busy = false;
-            this.stop();
-            // TODO Phase 2+: escalate to supervisor instead
-            console.error(`[Actor ${this.id}] crashed:`, err);
+            if (this.crashHandler) {
+                // supervisor decides — do NOT stop the actor here
+                await this.crashHandler.handleCrash(this.id, err, msg, stateBefore);
+            } else {
+                // orphan actor — stop and log
+                this.stop();
+                console.error(`[Actor ${this.id}] crashed:`, err);
+            }
+            return false;
         }
+
+        return !this.#mailbox.isEmpty;
     }
 }
 
@@ -128,8 +116,9 @@ export class Actor<State, Msg> {
 // Returns a ref, not the actor itself.
 export function spawn<State, Msg>(
     fn: ActorFn<State, Msg>,
-    options: ActorOptions<State, Msg>
+    options: ActorOptions<State, Msg>,
+    scheduler: Scheduler = defaultScheduler
 ): ActorRef<Msg> {
-    const actor = new Actor(fn, options);
+    const actor = new Actor(fn, options, scheduler);
     return actor.ref;
 }
