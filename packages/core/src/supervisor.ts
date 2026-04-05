@@ -1,6 +1,9 @@
-import { Actor, defaultScheduler } from "./actor.js";
-import { Scheduler } from "./scheduler.js";
-import { ActorFn, ActorOptions, ActorRef, CrashHandler, Supervisable, SupervisionStrategy } from "./types.js";
+import { Actor } from "./actor.js";
+import { DEFAULT_SCHEDULER, Scheduler } from "./scheduler.js";
+import { Task } from "./task.js";
+import { Server, ServerOptions } from "./server.js";
+import { ActorFn, ActorOptions, ActorRef, CrashHandler, Supervisable, SupervisionStrategy, ServerRef, AgentRef } from "./types.js";
+import { Agent, AgentOptions } from "./agent.js";
 
 interface SupervisorOptions {
     strategy?: SupervisionStrategy;
@@ -15,7 +18,7 @@ export class Supervisor implements CrashHandler, Supervisable {
     readonly #crashHandler: CrashHandler;
     readonly #children: Map<string, Supervisable> = new Map();
 
-    constructor(crashHandler: CrashHandler, { strategy = 'restartOne', id = `supervisor-${nextId()}`, scheduler = defaultScheduler }: SupervisorOptions = {}) {
+    constructor(crashHandler: CrashHandler, { strategy = 'restartOne', id = `supervisor-${nextId()}`, scheduler = DEFAULT_SCHEDULER }: SupervisorOptions = {}) {
         this.id = id;
         this.#scheduler = scheduler;
         this.#strategy = strategy;
@@ -40,6 +43,24 @@ export class Supervisor implements CrashHandler, Supervisable {
         const childSupervisor = new Supervisor(this, { strategy, scheduler: this.#scheduler });
         this.#children.set(childSupervisor.id, childSupervisor);
         return childSupervisor;
+    }
+
+    spawnTask<T>(fn: () => T | Promise<T>): Promise<T> {
+        const task = new Task(fn, { scheduler: this.#scheduler });
+        this.#children.set(task.id, task);
+        return task.promise;
+    }
+
+    spawnServer<State, Msg extends { type: string }>(options: ServerOptions<State, Msg>): ServerRef<Msg> {
+        const server = new Server({ ...options, scheduler: this.#scheduler, crashHandler: this });
+        this.#children.set(server.id, server);
+        return server.ref;
+    }
+
+    spawnAgent<State>(initialState: State, options: AgentOptions): AgentRef<State> {
+        const agent = new Agent(initialState, { ...options, scheduler: this.#scheduler, crashHandler: this });
+        this.#children.set(agent.id, agent);
+        return agent.ref;
     }
 
     // Stop all children immediately.

@@ -72,3 +72,7 @@ export class Scheduler {
         });
     }
 }
+
+// Default scheduler — used when spawn() is called without one.
+// All actors in the same process share this unless overridden.
+export const DEFAULT_SCHEDULER = new Scheduler(100, 16);

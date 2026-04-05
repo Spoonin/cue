@@ -3,16 +3,7 @@ import { Scheduler } from '../packages/core/src/scheduler.ts';
 const performance_timestamp = typeof performance !== 'undefined' ? performance : Date;
 
 const start = performance_timestamp.now();
-// TODO: spawn actor A
-// - state: number of pings sent
-// - on message { type: 'ping', count } → log it, send { type: 'pong', count } to B
 
-// TODO: spawn actor B
-// - state: number of pongs sent
-// - on message { type: 'pong', count } → log it, send { type: 'ping', count: count + 1 } back to A
-// - stop both actors when count reaches 10
-
-// TODO: kick it off — send the first { type: 'ping', count: 0 } to A
 type StateA = { count: number; peer: ActorRef<MsgB> | null }
 
 type MsgA =

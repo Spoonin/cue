@@ -39,3 +39,27 @@ export interface Drainable {
 export function assertUnreachable(x: never): never {
     throw new Error("Didn't expect to get here");
 }
+
+export type DistributiveOmit<T, K extends keyof any> = T extends any ? Omit<T, K> : never;
+
+export type Handlers<State, Msg extends { type: string }> = {
+    [M in Msg as M['type']]: M extends { reply: infer R }
+        ? (state: State, msg: M) => { state: State; reply: R }
+        : (state: State, msg: M) => State
+}
+
+export type CastMsg<M> = Exclude<M, { reply: unknown }>;
+export type CallMsg<M> = Extract<M, { reply: unknown }>;
+
+export type ServerRef<Msg> = {
+    readonly id: string;
+    cast(msg: CastMsg<Msg>): boolean;
+    call<M extends CallMsg<Msg>>(msg: DistributiveOmit<M, 'reply'>): Promise<M['reply']>;
+}
+
+export type AgentRef<State> = {
+    readonly id: string;
+    get<R>(fn: (state: State) => R): Promise<R>;
+    update(fn: (state: State) => State): void;
+    getAndUpdate<R>(fn: (state: State) => { state: State; reply: R }): Promise<R>;
+}

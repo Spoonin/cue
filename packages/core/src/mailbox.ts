@@ -1,5 +1,12 @@
 import { Queue } from "./queue.js";
 
+// Buffer between senders and the actor's processing loop.
+// Messages queue up here and are processed one at a time when
+// the scheduler calls drain(). This decouples "sending a message"
+// from "processing a message" — senders never block, and messages
+// are never lost while the actor is busy. The high watermark
+// provides backpressure: when the mailbox is full, push() signals
+// the sender to slow down.
 export class Mailbox<T> {
     #highWatermark: number;
     #queue: Queue<T> = new Queue();

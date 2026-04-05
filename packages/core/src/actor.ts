@@ -1,5 +1,5 @@
 import { Mailbox } from "./mailbox.js";
-import { Scheduler } from "./scheduler.js";
+import { DEFAULT_SCHEDULER, Scheduler } from "./scheduler.js";
 import { ActorFn, ActorOptions, ActorRef, CrashHandler, Drainable, Supervisable } from "./types.js";
 
 export type { ActorFn, ActorOptions, ActorRef, Drainable };
@@ -10,10 +10,6 @@ let _nextId = 0;
 function nextId(): string {
     return `actor-${_nextId++}`;
 }
-
-// Default scheduler — used when spawn() is called without one.
-// All actors in the same process share this unless overridden.
-export const defaultScheduler = new Scheduler(100, 16);
 
 export class Actor<State, Msg> implements Drainable, Supervisable {
     readonly id: string;
@@ -26,7 +22,7 @@ export class Actor<State, Msg> implements Drainable, Supervisable {
     #stopped = false;
     readonly #afterMessage?: (state: State) => void;
 
-    constructor(fn: ActorFn<State, Msg>, options: ActorOptions<State, Msg>, scheduler: Scheduler = defaultScheduler, private readonly crashHandler?: CrashHandler) {
+    constructor(fn: ActorFn<State, Msg>, options: ActorOptions<State, Msg>, scheduler: Scheduler = DEFAULT_SCHEDULER, private readonly crashHandler?: CrashHandler) {
         this.id = nextId();
         this.#fn = fn;
         this.#initState = options.initialState;
@@ -117,7 +113,7 @@ export class Actor<State, Msg> implements Drainable, Supervisable {
 export function spawn<State, Msg>(
     fn: ActorFn<State, Msg>,
     options: ActorOptions<State, Msg>,
-    scheduler: Scheduler = defaultScheduler
+    scheduler: Scheduler = DEFAULT_SCHEDULER
 ): ActorRef<Msg> {
     const actor = new Actor(fn, options, scheduler);
     return actor.ref;
