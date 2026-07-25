@@ -1,4 +1,6 @@
+import { describe, expect, it } from '@jest/globals';
 import { Task } from "../src/task";
+
 
 describe('Task', () => {
     it('resolves with the result of the task function', async () => {

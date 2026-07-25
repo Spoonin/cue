@@ -1,3 +1,4 @@
+import { describe, expect, it } from '@jest/globals';
 import { Scheduler } from "../src/scheduler";
 import { Supervisor } from "../src/supervisor";
 import { CrashHandler } from "../src/types";

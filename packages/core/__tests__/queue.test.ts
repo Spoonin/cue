@@ -1,3 +1,4 @@
+import { beforeEach, describe, expect, it } from '@jest/globals';
 import { Queue } from '../src/queue.js';
 
 describe('Queue', () => {
@@ -125,6 +126,39 @@ describe('Queue', () => {
         expect(next).toBeGreaterThan(prev as number);
         prev = next;
       }
+    });
+  });
+
+  // ── dequeueAll ────────────────────────────────────────────────────────────
+
+  describe('dequeueAll', () => {
+    it('returns an empty array when the queue is empty', () => {
+      expect(q.dequeueAll()).toEqual([]);
+    });
+
+    it('returns all items in FIFO order and empties the queue', () => {
+      q.enqueue(1);
+      q.enqueue(2);
+      q.enqueue(3);
+      expect(q.dequeueAll()).toEqual([1, 2, 3]);
+      expect(q.isEmpty()).toBe(true);
+    }); 
+
+    // The tricky case: force #tail to wrap past #cap while #head hasn't caught
+    // up yet (enqueue past capacity after dequeuing some items from the front,
+    // so head > 0 and tail wraps below head) — dequeueAll must still return
+    // items in enqueue order, not raw buffer-index order.
+    it('returns items in correct FIFO order when the ring buffer has wrapped around', () => {
+      const CAPACITY = 8;
+      const q = new Queue<number>(CAPACITY);
+      // fill the queue to capacity
+      for (let i = 0; i < CAPACITY; i++) q.enqueue(i);
+      // dequeue a few items to move head forward
+      for (let i = 0; i < 3; i++) expect(q.dequeue()).toBe(i);
+      // enqueue more items to wrap tail around past head
+      for (let i = CAPACITY; i < CAPACITY + 5; i++) q.enqueue(i);
+      // now dequeueAll should return all remaining items in correct order
+      expect(q.dequeueAll()).toEqual([3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
     });
   });
 

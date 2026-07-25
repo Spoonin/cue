@@ -1,3 +1,4 @@
+import { describe, expect, it } from '@jest/globals';
 import { Supervisor } from "../src/supervisor";
 import { Server } from "../src/server";
 import { CrashHandler } from "../src/types";
@@ -74,4 +75,87 @@ describe('Server', () => {
         expect((crashedErr as any).msg).toEqual({ type: 'crash' });
         expect((crashedErr as any).prevState).toBe(0);
     });
-}); 
+
+    // ── stop()/restart() must settle pending call() promises ─────────────────
+    // Regression coverage for: call() envelopes left in the mailbox when
+    // stop()/restart() runs used to hang forever instead of rejecting.
+
+    it('rejects a call() that is still queued when stop() is invoked before it drains',
+        async () => {
+            type Msg = { type: 'get', reply: number };
+            const server = new Server<number, Msg>({
+                initialState: 0,
+                handlers: {
+                    get: (state) => ({ state, reply: state }),
+                }
+            });
+
+            const callPromise = server.call({ type: 'get' });
+            server.stop();
+
+            await expect(callPromise).rejects.toThrow(/stopped/);
+        }   
+    );
+
+    it('rejects a call() queued behind a crashing message when a supervisor restarts the server (restartOne)',
+        async () => {
+            let crashInfo: unknown;
+            const crashHandler: CrashHandler = {
+                handleCrash: async (id, err, msg, prevState) => {
+                    crashInfo = { id, err, msg, prevState };
+                }
+            };
+
+            const supervisor = new Supervisor(crashHandler, {strategy: 'restartOne'});
+
+            type Msg = 
+            | { type: 'crash'; reply: number }
+            | { type: 'get', reply: number };
+            
+            const server = supervisor.spawnServer<number, Msg>({
+                initialState: 0,
+                handlers: {
+                    crash: () => { throw new Error('Crash!') },
+                    get: (state) => ({ state, reply: state }),
+                }
+            });
+
+            const crashPromise = server.call({ type: 'crash' });
+            const queuedCallPromise = server.call({ type: 'get' }); // enqueued behind it, before restart runs
+            await expect(crashPromise).rejects.toThrow(/Crash!/);
+            await expect(queuedCallPromise).rejects.toThrow(/stopped/); // this one *was* sitting in the mailbox during restart
+        }
+    );
+
+    it('rejects immediately when call() is invoked after the server is already stopped, without touching the mailbox',
+        async () => {
+            type Msg = { type: 'get', reply: number };
+            const server = new Server<number, Msg>({
+                initialState: 0,
+                handlers: {
+                    get: (state) => ({ state, reply: state }),
+                }
+            });
+
+            server.stop();
+
+            await expect(server.call({ type: 'get' })).rejects.toThrow(/stopped/);
+        }
+    );
+
+    it('throws when cast() is invoked after the server is already stopped',
+        async () => {
+            type Msg = { type: 'get', reply: number };
+            const server = new Server<number, Msg>({
+                initialState: 0,
+                handlers: {
+                    get: (state) => ({ state, reply: state }),
+                }
+            });
+
+            server.stop();
+
+            expect(() => server.cast({ type: 'get', reply: 0 })).toThrow(/stopped/);
+        }
+    );
+});

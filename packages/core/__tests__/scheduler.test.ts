@@ -1,4 +1,4 @@
-import { jest } from '@jest/globals';
+import { jest, describe, expect, it } from '@jest/globals';
 import { Scheduler } from '../src/scheduler.js';
 import { Drainable } from '../src/types.js';
 
