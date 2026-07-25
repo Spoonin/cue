@@ -51,12 +51,18 @@ export class Server<State, Msg extends { type: string }> implements Drainable, S
     }
 
     cast(msg: Msg): boolean {
+        if (this.#stopped) {
+            throw new Error(`Server ${this.id} is stopped`);
+        }
         const envelope: Envelope<Msg> = { msg };
         this.#scheduler.enqueue(this);
         return this.#mailbox.push(envelope);
     }
 
     call<M extends CallMsg<Msg>>(msg: DistributiveOmit<M, 'reply'>): Promise<M['reply']> {
+        if(this.#stopped) {
+            return Promise.reject(new Error(`Server ${this.id} is stopped`));
+        }
         const promise = new Promise<M['reply']>((resolve, reject) => {
             const envelope: Envelope<Msg> = {
                 msg: msg as unknown as Msg,
@@ -112,14 +118,22 @@ export class Server<State, Msg extends { type: string }> implements Drainable, S
         return this.#mailbox.count > 0; 
 
     }
-
+    #rejectPendingEnvelopes(): void {
+        const pendingEnvelopes = this.#mailbox.drainAll();
+        for (const envelope of pendingEnvelopes) {
+            if (envelope.reject) {
+                envelope.reject(new Error(`Server ${this.id} is stopped`));
+            }
+        }
+    }
     stop(): void {
         this.#stopped = true;
+        this.#rejectPendingEnvelopes();
     }
 
     restart(): void {
         this.#stopped = false;
-        this.#mailbox.clear();
+        this.#rejectPendingEnvelopes();
         this.#scheduler.enqueue(this);
         this.#state = this.#initialState;
     }

@@ -65,6 +65,7 @@ export class Actor<State, Msg> implements Drainable, Supervisable {
         return result;
     }
 
+    // soft stop — stops processing new messages, but drains the mailbox first.
     stop(): void {
         this.#stopped = true;
     }

@@ -26,6 +26,14 @@ export class Queue<T> {
     return item;
   }
 
+  dequeueAll(): T[] {
+    const items: T[] = [];
+    while (this.#size > 0) {
+      items.push(this.dequeue()!);
+    }
+    return items;
+  }
+
   // Push to the front — used by Supervisor.replayLast to re-enqueue a failed message.
   prepend(item: T) {
     if (this.#size === this.#cap) this.#grow();

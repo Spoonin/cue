@@ -43,6 +43,9 @@ export class Agent<State> implements Drainable, Supervisable {
     }
 
     get<R>(fn: (state: State) => R): Promise<R> {
+        if(this.#stopped) {
+            return Promise.reject(new Error(`Agent ${this.id} is stopped`));
+        }
         return new Promise((resolve, reject) => {
             this.#mailbox.push({fn: (state: State) => ({ state, reply: fn(state) }), resolve: resolve as (value: unknown) => void, reject});
             this.#scheduler.enqueue(this);
@@ -50,11 +53,17 @@ export class Agent<State> implements Drainable, Supervisable {
     }
 
     update(fn: (state: State) => State): void {
+        if(this.#stopped) {
+            throw new Error(`Agent ${this.id} is stopped`);
+        }
         this.#mailbox.push({fn: (state: State) => ({ state: fn(state) })});
         this.#scheduler.enqueue(this);
     }
 
     getAndUpdate<R>(fn: (state: State) => { state: State; reply: R }): Promise<R> {
+        if(this.#stopped) {
+            return Promise.reject(new Error(`Agent ${this.id} is stopped`));
+        }
         return new Promise((resolve, reject) => {
             this.#mailbox.push({fn, resolve: resolve as (value: unknown) => void, reject});
             this.#scheduler.enqueue(this);
@@ -84,10 +93,23 @@ export class Agent<State> implements Drainable, Supervisable {
         return !this.#mailbox.isEmpty;
     }
 
-    stop(): void { this.#stopped = true; }
-    restart(): void { 
+    #rejectPendingEnvelopes(): void {
+        const pendingEnvelopes = this.#mailbox.drainAll();
+        for (const envelope of pendingEnvelopes) {
+            if (envelope.reject) {
+                envelope.reject(new Error(`Agent ${this.id} is stopped`));
+            }
+        }
+    }
+
+    stop(): void {
+        this.#stopped = true;
+        this.#rejectPendingEnvelopes();
+    }
+
+    restart(): void {
         this.#stopped = false;
         this.#state = this.#initialState;
-        this.#mailbox.clear();
+        this.#rejectPendingEnvelopes();
     }
 }
