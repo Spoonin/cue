@@ -23,6 +23,7 @@ export class Actor<State, Msg> implements Drainable, Supervisable {
     // Gates the clean-drain notification so the healthy path costs one boolean test
     // rather than a supervisor call per message.
     #failedSinceCleanDrain = false;
+    #suspended = false;
     readonly #afterMessage?: (state: State) => void;
 
     constructor(fn: ActorFn<State, Msg>, options: ActorOptions<State, Msg>, scheduler: Scheduler = DEFAULT_SCHEDULER, private readonly crashHandler?: CrashHandler) {
@@ -49,6 +50,7 @@ export class Actor<State, Msg> implements Drainable, Supervisable {
     restart(opts?: RestartOptions): void {
         const policy = opts?.policy ?? 'reset';
         this.#stopped = false;
+        this.#suspended = false;
 
         if (policy === 'reset') {
             this.#state = this.#initState;
@@ -65,7 +67,9 @@ export class Actor<State, Msg> implements Drainable, Supervisable {
             throw new Error(`Actor ${this.id} is stopped`);
         }
         const result = this.#mailbox.push(msg);
-        this.#scheduler.enqueue(this);
+        // While suspended there is no point waking the scheduler — drain() would
+        // just decline. restart() re-enqueues us when the backoff elapses.
+        if (!this.#suspended) this.#scheduler.enqueue(this);
         return result;
     }
 
@@ -74,13 +78,18 @@ export class Actor<State, Msg> implements Drainable, Supervisable {
             throw new Error(`Actor ${this.id} is stopped`);
         }
         const result = this.#mailbox.tryPush(msg);
-        if (result) this.#scheduler.enqueue(this);
+        if (result && !this.#suspended) this.#scheduler.enqueue(this);
         return result;
     }
 
     // soft stop — stops processing new messages, but drains the mailbox first.
     stop(): void {
         this.#stopped = true;
+    }
+
+    // Keep queueing, stop draining. Cleared by restart().
+    suspend(): void {
+        this.#suspended = true;
     }
 
     get state(): State {
@@ -97,6 +106,8 @@ export class Actor<State, Msg> implements Drainable, Supervisable {
 
     // Called by the Scheduler — processes one message, returns true if more remain.
     async drain(): Promise<boolean> {
+        if (this.#suspended) return false; // backing off — restart() will re-enqueue us
+
         const msg = this.#mailbox.pull();
         if (msg === undefined) return false;
 

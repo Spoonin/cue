@@ -30,6 +30,7 @@ export class Agent<State> implements Drainable, Supervisable {
     #stopped = false;
     // See Actor — gates the clean-drain notification off the hot path.
     #failedSinceCleanDrain = false;
+    #suspended = false;
     readonly #mailbox: Mailbox<Envelope<State>>;
     readonly ref: AgentRef<State>;
 
@@ -74,6 +75,7 @@ export class Agent<State> implements Drainable, Supervisable {
 
     async drain(): Promise<boolean> {
         if (this.#stopped) return false;
+        if (this.#suspended) return false; // backing off — restart() will re-enqueue us
 
         const envelope = this.#mailbox.pull();
         if (!envelope) return false;
@@ -122,9 +124,15 @@ export class Agent<State> implements Drainable, Supervisable {
         this.#rejectPendingEnvelopes();
     }
 
+    // Keep queueing, stop draining. Cleared by restart().
+    suspend(): void {
+        this.#suspended = true;
+    }
+
     restart(opts?: RestartOptions): void {
         const policy = opts?.policy ?? 'reset';
         this.#stopped = false;
+        this.#suspended = false;
 
         if (policy === 'reset') {
             this.#state = this.#initialState;

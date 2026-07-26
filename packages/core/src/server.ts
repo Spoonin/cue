@@ -35,6 +35,7 @@ export class Server<State, Msg extends { type: string }> implements Drainable, S
     #stopped = false;
     // See Actor — gates the clean-drain notification off the hot path.
     #failedSinceCleanDrain = false;
+    #suspended = false;
     readonly #initialState: State;
 
     constructor(options: ServerOptions<State, Msg>) {
@@ -80,7 +81,8 @@ export class Server<State, Msg extends { type: string }> implements Drainable, S
 
     async drain(): Promise<boolean> {
         if (this.#stopped) return false;
-        
+        if (this.#suspended) return false; // backing off — restart() will re-enqueue us
+
         const envelope = this.#mailbox.pull();
         if (!envelope) return false;
 
@@ -159,11 +161,17 @@ export class Server<State, Msg extends { type: string }> implements Drainable, S
         this.#rejectPendingEnvelopes();
     }
 
+    // Keep queueing, stop draining. Cleared by restart().
+    suspend(): void {
+        this.#suspended = true;
+    }
+
     // Only `reset` discards queued work. Under resume/replay the pending envelopes —
     // and the call() promises they carry — survive the restart untouched.
     restart(opts?: RestartOptions): void {
         const policy = opts?.policy ?? 'reset';
         this.#stopped = false;
+        this.#suspended = false;
 
         if (policy === 'reset') {
             this.#rejectPendingEnvelopes();

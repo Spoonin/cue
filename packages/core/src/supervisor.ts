@@ -2,7 +2,7 @@ import { Actor } from "./actor.js";
 import { DEFAULT_SCHEDULER, Scheduler } from "./scheduler.js";
 import { Task } from "./task.js";
 import { Server, ServerOptions } from "./server.js";
-import { ActorFn, ActorOptions, ActorRef, Crash, CrashHandler, Directive, ErrorReporter, Policy, RestartOptions, Scope, Supervisable, ServerRef, AgentRef } from "./types.js";
+import { ActorFn, ActorOptions, ActorRef, Backoff, Crash, CrashHandler, Directive, ErrorReporter, Policy, RestartOptions, Scope, Supervisable, ServerRef, AgentRef } from "./types.js";
 import { Agent, AgentOptions } from "./agent.js";
 
 interface SupervisorOptions {
@@ -16,6 +16,8 @@ interface SupervisorOptions {
     // How many times one message may be redelivered before it is treated as
     // poison and dropped. Only meaningful under policy 'replay'.
     maxAttempts?: number;
+    // Delay before a crashed child is restarted. 'none' restarts immediately.
+    backoff?: Backoff;
     id?: string;
     scheduler?: Scheduler;
 }
@@ -48,7 +50,9 @@ export class Supervisor implements CrashHandler, Supervisable {
     readonly #children: Map<string, Supervisable> = new Map();
     readonly #maxRestarts: number;
     readonly #maxAttempts: number;
+    readonly #backoff: Backoff;
     readonly #budgets: Map<string, Budget> = new Map();
+    readonly #timers: Map<string, ReturnType<typeof setTimeout>> = new Map();
 
     constructor(
         parent: CrashHandler | ErrorReporter,
@@ -57,6 +61,7 @@ export class Supervisor implements CrashHandler, Supervisable {
             policy = 'reset',
             maxRestarts = 5,
             maxAttempts = 3,
+            backoff = { initialMs: 100, maxMs: 30_000, factor: 2, jitter: true },
             id = `supervisor-${nextId()}`,
             scheduler = DEFAULT_SCHEDULER,
         }: SupervisorOptions = {}
@@ -70,6 +75,7 @@ export class Supervisor implements CrashHandler, Supervisable {
         this.#policy = policy;
         this.#maxRestarts = maxRestarts;
         this.#maxAttempts = maxAttempts;
+        this.#backoff = backoff;
         this.#parent = asCrashHandler(parent);
     }
 
@@ -115,9 +121,57 @@ export class Supervisor implements CrashHandler, Supervisable {
 
     // Stop all children immediately.
     stop(): void {
-        for (const child of this.#children.values()) {
+        for (const [id, child] of this.#children) {
+            this.#cancelPendingRestart(id);
             child.stop();
         }
+    }
+
+    suspend(): void {
+        for (const child of this.#children.values()) {
+            child.suspend();
+        }
+    }
+
+    #cancelPendingRestart(childId: string): void {
+        const timer = this.#timers.get(childId);
+        if (timer !== undefined) {
+            clearTimeout(timer);
+            this.#timers.delete(childId);
+        }
+    }
+
+    // Restart after a delay WITHOUT awaiting it. The scheduler drains actors
+    // sequentially, and handleCrash is awaited inside drain(), so sleeping here
+    // would freeze every other actor sharing the scheduler. Instead the child
+    // suspends — it keeps accepting messages but stops draining — and a timer
+    // restarts it later.
+    #restartAfterBackoff(childId: string, child: Supervisable, restarts: number, opts: RestartOptions): void {
+        if (this.#backoff === 'none') {
+            child.restart(opts);
+            return;
+        }
+
+        this.#cancelPendingRestart(childId);
+        child.suspend();
+
+        const timer = setTimeout(() => {
+            this.#timers.delete(childId);
+            child.restart(opts);
+        }, this.#delayFor(restarts));
+
+        // A supervisor waiting to restart should not by itself keep the process alive.
+        timer.unref?.();
+        this.#timers.set(childId, timer);
+    }
+
+    #delayFor(restarts: number): number {
+        const backoff = this.#backoff;
+        if (backoff === 'none') return 0;
+        const growth = backoff.initialMs * Math.pow(backoff.factor, Math.max(0, restarts - 1));
+        const capped = Math.min(growth, backoff.maxMs);
+        // Equal jitter: half fixed, half random.
+        return backoff.jitter ? capped / 2 + Math.random() * (capped / 2) : capped;
     }
 
     // A supervisor holds no state and no mailbox, so it absorbs `state` and forwards
@@ -141,15 +195,15 @@ export class Supervisor implements CrashHandler, Supervisable {
 
     // Apply `fn` to every child in scope. `isCrashed` marks the one child that was
     // actually holding the failed message.
-    #eachInScope(crashedId: string, fn: (child: Supervisable, isCrashed: boolean) => void): void {
+    #eachInScope(crashedId: string, fn: (child: Supervisable, id: string, isCrashed: boolean) => void): void {
         switch (this.#scope) {
             case 'one': {
                 const child = this.#children.get(crashedId);
-                if (child) fn(child, true);
+                if (child) fn(child, crashedId, true);
                 break;
             }
             case 'all': {
-                for (const [id, child] of this.#children) fn(child, id === crashedId);
+                for (const [id, child] of this.#children) fn(child, id, id === crashedId);
                 break;
             }
             case 'rest': {
@@ -159,7 +213,7 @@ export class Supervisor implements CrashHandler, Supervisable {
                 const start = ids.indexOf(crashedId);
                 if (start === -1) return;
                 for (let i = start; i < ids.length; i++) {
-                    fn(this.#children.get(ids[i])!, ids[i] === crashedId);
+                    fn(this.#children.get(ids[i])!, ids[i], ids[i] === crashedId);
                 }
                 break;
             }
@@ -186,7 +240,10 @@ export class Supervisor implements CrashHandler, Supervisable {
                 budget.restarts++;
                 if (budget.restarts > this.#maxRestarts) {
                     this.#budgets.delete(crash.childId);
-                    this.#eachInScope(crash.childId, (child) => child.stop());
+                    this.#eachInScope(crash.childId, (child, id) => {
+                        this.#cancelPendingRestart(id); // no reviving a retired child
+                        child.stop();
+                    });
                     return 'drop';
                 }
 
@@ -212,9 +269,11 @@ export class Supervisor implements CrashHandler, Supervisable {
                 }
 
                 // Siblings never saw the message, so replay is meaningless for them.
+                // They share the crashed child's delay so a scoped restart stays a
+                // single coordinated event rather than a stagger.
                 const siblingPolicy: Policy = this.#policy === 'replay' ? 'resume' : this.#policy;
-                this.#eachInScope(crash.childId, (child, isCrashed) => {
-                    child.restart(isCrashed
+                this.#eachInScope(crash.childId, (child, id, isCrashed) => {
+                    this.#restartAfterBackoff(id, child, budget.restarts, isCrashed
                         ? { policy: this.#policy, state: crash.previousState }
                         : { policy: siblingPolicy });
                 });

@@ -30,8 +30,22 @@ export interface RestartOptions {
     state?: unknown;
 }
 
+// Exponential backoff between restarts. 'none' restarts immediately.
+export type Backoff = 'none' | {
+    initialMs: number;
+    maxMs: number;
+    factor: number;
+    // Equal jitter — half the delay fixed, half random — so a group of children
+    // failing on the same downstream dependency does not retry in lockstep.
+    jitter?: boolean;
+};
+
 export interface Supervisable {
     stop(): void;
+    // Alive and still accepting messages, but not draining them. A third state
+    // distinct from stopped: stopped children throw on send(), suspended ones
+    // queue. Required so backoff never blocks the scheduler.
+    suspend(): void;
     restart(opts?: RestartOptions): void;
 }
 

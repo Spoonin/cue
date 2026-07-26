@@ -62,6 +62,12 @@ export class Task<T> implements Drainable, Supervisable {
         this.#reject?.(new Error(`Task ${this.id} was stopped`));
     }
 
+    // A task runs once and its promise has already settled — there is nothing to
+    // back off from.
+    suspend(): void {
+        // no-op
+    }
+
     restart(_opts?: RestartOptions): void {
         // Task is temporary — its promise has already settled, so there is nothing
         // to restore and no message to replay. Policy is deliberately ignored.
