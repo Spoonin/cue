@@ -20,6 +20,9 @@ export class Actor<State, Msg> implements Drainable, Supervisable {
     readonly #fn: ActorFn<State, Msg>;
     readonly #scheduler: Scheduler;
     #stopped = false;
+    // Gates the clean-drain notification so the healthy path costs one boolean test
+    // rather than a supervisor call per message.
+    #failedSinceCleanDrain = false;
     readonly #afterMessage?: (state: State) => void;
 
     constructor(fn: ActorFn<State, Msg>, options: ActorOptions<State, Msg>, scheduler: Scheduler = DEFAULT_SCHEDULER, private readonly crashHandler?: CrashHandler) {
@@ -103,7 +106,12 @@ export class Actor<State, Msg> implements Drainable, Supervisable {
             const result = this.#fn(this.#state, msg);
             this.#state = result instanceof Promise ? await result : result;
             this.#afterMessage?.(this.#state);
+            if (this.#failedSinceCleanDrain) {
+                this.#failedSinceCleanDrain = false;
+                this.crashHandler?.noteCleanDrain?.(this.id);
+            }
         } catch (err) {
+            this.#failedSinceCleanDrain = true;
             if (this.crashHandler) {
                 // supervisor decides — do NOT stop the actor here.
                 // It restarts us first, then tells us what to do with this message.

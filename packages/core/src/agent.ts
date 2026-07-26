@@ -28,6 +28,8 @@ export class Agent<State> implements Drainable, Supervisable {
     readonly #scheduler: Scheduler;
     readonly #crashHandler?: CrashHandler;
     #stopped = false;
+    // See Actor — gates the clean-drain notification off the hot path.
+    #failedSinceCleanDrain = false;
     readonly #mailbox: Mailbox<Envelope<State>>;
     readonly ref: AgentRef<State>;
 
@@ -82,7 +84,12 @@ export class Agent<State> implements Drainable, Supervisable {
             if (envelope.resolve) {
                 envelope.resolve(result.reply);
             }
+            if (this.#failedSinceCleanDrain) {
+                this.#failedSinceCleanDrain = false;
+                this.#crashHandler?.noteCleanDrain?.(this.id);
+            }
         } catch (error) {
+            this.#failedSinceCleanDrain = true;
             // Ask the supervisor BEFORE settling the caller's promise — on replay we
             // re-queue the envelope with its resolvers intact instead of rejecting.
             if (this.#crashHandler) {

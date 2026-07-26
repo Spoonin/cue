@@ -39,6 +39,11 @@ export interface Supervisable {
 // crashing child what to do with the message it is still holding.
 export interface CrashHandler {
     handleCrash(crash: Crash): Promise<Directive>;
+
+    // Called after a child processes a message without throwing, which is what
+    // resets its restart budget. Children only call this if they have crashed
+    // since the last clean drain, so the healthy path stays a boolean test.
+    noteCleanDrain?(childId: string): void;
 }
 
 // What a caller passes to the root Supervisor: a terminal reporter, not a decider.

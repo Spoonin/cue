@@ -8,8 +8,23 @@ import { Agent, AgentOptions } from "./agent.js";
 interface SupervisorOptions {
     scope?: Scope;
     policy?: Policy;
+    // Consecutive restarts a single child may accumulate before it is retired.
+    // Deliberately NOT a sliding window: once backoff delays exceed any window,
+    // every restart lands alone inside its own window and the budget silently
+    // stops being a budget. A clean drain resets the count instead.
+    maxRestarts?: number;
+    // How many times one message may be redelivered before it is treated as
+    // poison and dropped. Only meaningful under policy 'replay'.
+    maxAttempts?: number;
     id?: string;
     scheduler?: Scheduler;
+}
+
+// Per-child failure bookkeeping. Absent === healthy.
+interface Budget {
+    restarts: number;
+    lastMessage: unknown;
+    attempts: number;
 }
 
 // A user hands the root Supervisor an ErrorReporter; nested supervisors hand their
@@ -31,10 +46,20 @@ export class Supervisor implements CrashHandler, Supervisable {
     readonly id: string;
     readonly #parent: CrashHandler;
     readonly #children: Map<string, Supervisable> = new Map();
+    readonly #maxRestarts: number;
+    readonly #maxAttempts: number;
+    readonly #budgets: Map<string, Budget> = new Map();
 
     constructor(
         parent: CrashHandler | ErrorReporter,
-        { scope = 'one', policy = 'reset', id = `supervisor-${nextId()}`, scheduler = DEFAULT_SCHEDULER }: SupervisorOptions = {}
+        {
+            scope = 'one',
+            policy = 'reset',
+            maxRestarts = 5,
+            maxAttempts = 3,
+            id = `supervisor-${nextId()}`,
+            scheduler = DEFAULT_SCHEDULER,
+        }: SupervisorOptions = {}
     ) {
         if (!parent) {
             throw new Error("Supervisor missing a parent CrashHandler or ErrorReporter");
@@ -43,7 +68,14 @@ export class Supervisor implements CrashHandler, Supervisable {
         this.#scheduler = scheduler;
         this.#scope = scope;
         this.#policy = policy;
+        this.#maxRestarts = maxRestarts;
+        this.#maxAttempts = maxAttempts;
         this.#parent = asCrashHandler(parent);
+    }
+
+    // A child processed a message without throwing, so it is healthy again.
+    noteCleanDrain(childId: string): void {
+        this.#budgets.delete(childId);
     }
 
     // Spawn a child actor under this supervisor.
@@ -98,6 +130,15 @@ export class Supervisor implements CrashHandler, Supervisable {
         }
     }
 
+    #budgetFor(childId: string): Budget {
+        let budget = this.#budgets.get(childId);
+        if (!budget) {
+            budget = { restarts: 0, lastMessage: undefined, attempts: 0 };
+            this.#budgets.set(childId, budget);
+        }
+        return budget;
+    }
+
     // Apply `fn` to every child in scope. `isCrashed` marks the one child that was
     // actually holding the failed message.
     #eachInScope(crashedId: string, fn: (child: Supervisable, isCrashed: boolean) => void): void {
@@ -139,6 +180,37 @@ export class Supervisor implements CrashHandler, Supervisable {
             case 'reset':
             case 'resume':
             case 'replay': {
+                const budget = this.#budgetFor(crash.childId);
+
+                // Restart budget first: a child about to be retired should not replay.
+                budget.restarts++;
+                if (budget.restarts > this.#maxRestarts) {
+                    this.#budgets.delete(crash.childId);
+                    this.#eachInScope(crash.childId, (child) => child.stop());
+                    return 'drop';
+                }
+
+                // Per-message attempts. Identity, not equality: replay pushes the very
+                // same reference back, so `===` distinguishes "this message failed
+                // again" from "a different message failed". A WeakMap would not work —
+                // messages are frequently primitives.
+                let replay = this.#policy === 'replay';
+                if (replay) {
+                    if (budget.lastMessage === crash.message) {
+                        budget.attempts++;
+                    } else {
+                        budget.lastMessage = crash.message;
+                        budget.attempts = 1;
+                    }
+                    if (budget.attempts >= this.#maxAttempts) {
+                        // Poison. Drop it and let the child carry on with the rest of
+                        // its mailbox rather than retiring the child itself.
+                        replay = false;
+                        budget.lastMessage = undefined;
+                        budget.attempts = 0;
+                    }
+                }
+
                 // Siblings never saw the message, so replay is meaningless for them.
                 const siblingPolicy: Policy = this.#policy === 'replay' ? 'resume' : this.#policy;
                 this.#eachInScope(crash.childId, (child, isCrashed) => {
@@ -146,7 +218,7 @@ export class Supervisor implements CrashHandler, Supervisable {
                         ? { policy: this.#policy, state: crash.previousState }
                         : { policy: siblingPolicy });
                 });
-                return this.#policy === 'replay' ? 'replay' : 'drop';
+                return replay ? 'replay' : 'drop';
             }
 
             default:

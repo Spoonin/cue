@@ -33,6 +33,8 @@ export class Server<State, Msg extends { type: string }> implements Drainable, S
     readonly #crashHandler?: CrashHandler;
     #state: State;
     #stopped = false;
+    // See Actor — gates the clean-drain notification off the hot path.
+    #failedSinceCleanDrain = false;
     readonly #initialState: State;
 
     constructor(options: ServerOptions<State, Msg>) {
@@ -90,7 +92,9 @@ export class Server<State, Msg extends { type: string }> implements Drainable, S
                 const { state, reply } = await callHandler(this.#state, envelope.msg);
                 this.#state = state;
                 envelope.resolve(reply);
+                this.#noteCleanDrain();
             } catch (err) {
+                this.#failedSinceCleanDrain = true;
                 if (this.#crashHandler) {
                     // The envelope is already pulled, so its resolvers are still ours to
                     // keep. On replay we re-queue it intact rather than rejecting, and the
@@ -114,7 +118,9 @@ export class Server<State, Msg extends { type: string }> implements Drainable, S
                 const castHandler = handler as (state: State, msg: Msg) => State;
                 const newState = await castHandler(this.#state, envelope.msg);
                 this.#state = newState as State;
+                this.#noteCleanDrain();
             } catch (err) {
+                this.#failedSinceCleanDrain = true;
                 if (this.#crashHandler) {
                     const directive = await this.#crashHandler.handleCrash({
                         childId: this.id,
@@ -133,6 +139,13 @@ export class Server<State, Msg extends { type: string }> implements Drainable, S
         return this.#mailbox.count > 0;
 
     }
+    #noteCleanDrain(): void {
+        if (this.#failedSinceCleanDrain) {
+            this.#failedSinceCleanDrain = false;
+            this.#crashHandler?.noteCleanDrain?.(this.id);
+        }
+    }
+
     #rejectPendingEnvelopes(): void {
         const pendingEnvelopes = this.#mailbox.drainAll();
         for (const envelope of pendingEnvelopes) {
