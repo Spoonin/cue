@@ -1,7 +1,7 @@
 import { describe, expect, it } from '@jest/globals';
 import { Scheduler } from "../src/scheduler";
 import { Supervisor } from "../src/supervisor";
-import { Crash, ErrorReporter } from "../src/types";
+import { Crash, DeadLetter, ErrorReporter } from "../src/types";
 
 type Counter = { count: number };
 
@@ -490,5 +490,74 @@ describe('Supervisor backoff', () => {
         await scheduler.whenIdle();
 
         expect(() => actor.send('nop')).toThrow(/stopped/);
+    });
+});
+
+describe('Supervisor dead letters', () => {
+    function collectLetters() {
+        const letters: DeadLetter[] = [];
+        return { letters, onDeadLetter: (l: DeadLetter) => { letters.push(l); } };
+    }
+
+    it('reports a message dropped by a restart policy — otherwise crashes are silent', async () => {
+        const { letters, onDeadLetter } = collectLetters();
+        const scheduler = new Scheduler();
+        const supervisor = new Supervisor(silent, { backoff: 'none', policy: 'reset', onDeadLetter, scheduler });
+        const actor = supervisor.spawn<Counter, string>(testFn, { initialState: { count: 0 } });
+
+        actor.send('trigger');
+        await scheduler.whenIdle();
+
+        expect(letters).toHaveLength(1);
+        expect(letters[0].reason).toBe('dropped');
+        expect(letters[0].message).toBe('trigger');
+        expect((letters[0].error as Error).message).toBe('Crash!');
+    });
+
+    it('distinguishes a poison message from a retired child', async () => {
+        const { letters, onDeadLetter } = collectLetters();
+        const scheduler = new Scheduler();
+        const supervisor = new Supervisor(silent, {
+            backoff: 'none', policy: 'replay', maxAttempts: 2, maxRestarts: 50, onDeadLetter, scheduler,
+        });
+
+        type Msg = { type: 'poison'; reply: string };
+        const server = supervisor.spawnServer<number, Msg>({
+            initialState: 0,
+            handlers: { poison: () => { throw new Error('always fails'); } },
+        });
+
+        await expect(server.call({ type: 'poison' })).rejects.toThrow(/always fails/);
+
+        expect(letters).toHaveLength(1);
+        expect(letters[0].reason).toBe('poison');
+    });
+
+    it('reports "retired" when a child exhausts its restart budget', async () => {
+        const { letters, onDeadLetter } = collectLetters();
+        const scheduler = new Scheduler();
+        const supervisor = new Supervisor(silent, { backoff: 'none', maxRestarts: 1, onDeadLetter, scheduler });
+        const actor = supervisor.spawn<Counter, string>(testFn, { initialState: { count: 0 } });
+
+        actor.send('trigger');
+        await scheduler.whenIdle();
+        actor.send('trigger');
+        await scheduler.whenIdle();
+
+        expect(letters.map(l => l.reason)).toEqual(['dropped', 'retired']);
+    });
+
+    it('is inherited by child supervisors so a nested tree reports to one place', async () => {
+        const { letters, onDeadLetter } = collectLetters();
+        const scheduler = new Scheduler();
+        const parent = new Supervisor(silent, { backoff: 'none', onDeadLetter, scheduler });
+        const child = parent.spawnSupervisor({ policy: 'reset' }); // no hook of its own
+        const actor = child.spawn<Counter, string>(testFn, { initialState: { count: 0 } });
+
+        actor.send('trigger');
+        await scheduler.whenIdle();
+
+        expect(letters).toHaveLength(1);
+        expect(letters[0].childId).toBe(actor.id);
     });
 });

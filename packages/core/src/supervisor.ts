@@ -2,7 +2,7 @@ import { Actor } from "./actor.js";
 import { DEFAULT_SCHEDULER, Scheduler } from "./scheduler.js";
 import { Task } from "./task.js";
 import { Server, ServerOptions } from "./server.js";
-import { ActorFn, ActorOptions, ActorRef, Backoff, Crash, CrashHandler, Directive, ErrorReporter, Policy, RestartOptions, Scope, Supervisable, ServerRef, AgentRef } from "./types.js";
+import { ActorFn, ActorOptions, ActorRef, Backoff, Crash, CrashHandler, DeadLetter, DeadLetterReason, Directive, ErrorReporter, Policy, RestartOptions, Scope, Supervisable, ServerRef, AgentRef } from "./types.js";
 import { Agent, AgentOptions } from "./agent.js";
 
 interface SupervisorOptions {
@@ -18,6 +18,9 @@ interface SupervisorOptions {
     maxAttempts?: number;
     // Delay before a crashed child is restarted. 'none' restarts immediately.
     backoff?: Backoff;
+    // Notified for every message that will never be delivered. Child supervisors
+    // inherit this unless they set their own.
+    onDeadLetter?: (letter: DeadLetter) => void;
     id?: string;
     scheduler?: Scheduler;
 }
@@ -51,6 +54,7 @@ export class Supervisor implements CrashHandler, Supervisable {
     readonly #maxRestarts: number;
     readonly #maxAttempts: number;
     readonly #backoff: Backoff;
+    readonly #onDeadLetter?: (letter: DeadLetter) => void;
     readonly #budgets: Map<string, Budget> = new Map();
     readonly #timers: Map<string, ReturnType<typeof setTimeout>> = new Map();
 
@@ -62,6 +66,7 @@ export class Supervisor implements CrashHandler, Supervisable {
             maxRestarts = 5,
             maxAttempts = 3,
             backoff = { initialMs: 100, maxMs: 30_000, factor: 2, jitter: true },
+            onDeadLetter,
             id = `supervisor-${nextId()}`,
             scheduler = DEFAULT_SCHEDULER,
         }: SupervisorOptions = {}
@@ -76,6 +81,7 @@ export class Supervisor implements CrashHandler, Supervisable {
         this.#maxRestarts = maxRestarts;
         this.#maxAttempts = maxAttempts;
         this.#backoff = backoff;
+        this.#onDeadLetter = onDeadLetter;
         this.#parent = asCrashHandler(parent);
     }
 
@@ -96,7 +102,13 @@ export class Supervisor implements CrashHandler, Supervisable {
 
     // Spawn a child supervisor under this supervisor.
     spawnSupervisor(options: Omit<SupervisorOptions, 'scheduler'> = {}): Supervisor {
-        const childSupervisor = new Supervisor(this, { ...options, scheduler: this.#scheduler });
+        const childSupervisor = new Supervisor(this, {
+            // Inherited so a nested tree reports dead letters to one place by
+            // default, without wiring the hook at every level.
+            onDeadLetter: this.#onDeadLetter,
+            ...options,
+            scheduler: this.#scheduler,
+        });
         this.#children.set(childSupervisor.id, childSupervisor);
         return childSupervisor;
     }
@@ -184,6 +196,15 @@ export class Supervisor implements CrashHandler, Supervisable {
         }
     }
 
+    #deadLetter(crash: Crash, reason: DeadLetterReason): void {
+        this.#onDeadLetter?.({
+            childId: crash.childId,
+            message: crash.message,
+            error: crash.error,
+            reason,
+        });
+    }
+
     #budgetFor(childId: string): Budget {
         let budget = this.#budgets.get(childId);
         if (!budget) {
@@ -228,7 +249,11 @@ export class Supervisor implements CrashHandler, Supervisable {
                 return this.#parent.handleCrash({ ...crash, childId: this.id });
 
             case 'stop':
-                this.#eachInScope(crash.childId, (child) => child.stop());
+                this.#eachInScope(crash.childId, (child, id) => {
+                    this.#cancelPendingRestart(id);
+                    child.stop();
+                });
+                this.#deadLetter(crash, 'retired');
                 return 'drop';
 
             case 'reset':
@@ -244,6 +269,7 @@ export class Supervisor implements CrashHandler, Supervisable {
                         this.#cancelPendingRestart(id); // no reviving a retired child
                         child.stop();
                     });
+                    this.#deadLetter(crash, 'retired');
                     return 'drop';
                 }
 
@@ -252,6 +278,8 @@ export class Supervisor implements CrashHandler, Supervisable {
                 // again" from "a different message failed". A WeakMap would not work —
                 // messages are frequently primitives.
                 let replay = this.#policy === 'replay';
+                // Anything not replayed is a message that will never be delivered.
+                let reason: DeadLetterReason | undefined = replay ? undefined : 'dropped';
                 if (replay) {
                     if (budget.lastMessage === crash.message) {
                         budget.attempts++;
@@ -263,6 +291,7 @@ export class Supervisor implements CrashHandler, Supervisable {
                         // Poison. Drop it and let the child carry on with the rest of
                         // its mailbox rather than retiring the child itself.
                         replay = false;
+                        reason = 'poison';
                         budget.lastMessage = undefined;
                         budget.attempts = 0;
                     }
@@ -277,6 +306,8 @@ export class Supervisor implements CrashHandler, Supervisable {
                         ? { policy: this.#policy, state: crash.previousState }
                         : { policy: siblingPolicy });
                 });
+
+                if (reason) this.#deadLetter(crash, reason);
                 return replay ? 'replay' : 'drop';
             }
 
