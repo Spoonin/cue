@@ -120,7 +120,9 @@ Handlers for `cast` messages return the new `State` directly; handlers for `call
 
 **Restart resets state to `initialState` *by default*.** That's `policy: 'reset'`, chosen deliberately: resuming with the state that caused a crash tends to re-crash, which is Erlang's original insight. Use `resume` or `replay` when a failure is more likely transient than structural.
 
-**A timed-out `call()` never runs its handler.** `callTimeoutMs` defaults to 30s, measured from `call()` — not from when the message starts draining. On expiry the message is discarded rather than processed, so a caller told "failed" can't have its side effect applied anyway. Erlang's `gen_server` does the opposite; see ADR 002 for why we didn't. Pass `Infinity` to wait forever.
+**A timed-out reply never runs its handler.** `replyTimeoutMs` (30s default) applies to `Server.call` and to `Agent.get`/`getAndUpdate`, measured from the call — not from when the message starts draining, since queue depth and backoff are part of what a caller is waiting through. On expiry the message is discarded rather than processed, so a caller told "failed" can't have its side effect applied late. Erlang's `gen_server` does the opposite; see ADR 002 for why we didn't. Pass `Infinity` to wait forever.
+
+`Agent.update` has no deadline — it's fire-and-forget, so nobody is waiting on it.
 
 **All actors share one scheduler unless you pass your own.** `DEFAULT_SCHEDULER` (`throughput: 100`, `tickBudget: 16ms`) is a module-level singleton (`src/scheduler.ts:78`), so unrelated actors in the same process compete for the same tick budget. Pass a dedicated `Scheduler` (as in `examples/fair-scheduling.ts`) if one actor's message volume shouldn't starve another's.
 

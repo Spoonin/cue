@@ -155,11 +155,11 @@ describe('Server call timeouts', () => {
 
     // Suspending is the deterministic way to hold a message in the mailbox long
     // enough to time out, without depending on scheduler timing.
-    function suspendedServer(callTimeoutMs: number, crashHandler?: CrashHandler) {
+    function suspendedServer(replyTimeoutMs: number, crashHandler?: CrashHandler) {
         let ran = false;
         const server = new Server<number, Msg>({
             initialState: 0,
-            callTimeoutMs,
+            replyTimeoutMs,
             crashHandler,
             handlers: {
                 work: (state) => { ran = true; return { state, reply: 'done' }; },
@@ -169,7 +169,7 @@ describe('Server call timeouts', () => {
         return { server, ran: () => ran };
     }
 
-    it('rejects a call that is not processed within callTimeoutMs', async () => {
+    it('rejects a call that is not processed within replyTimeoutMs', async () => {
         const { server } = suspendedServer(20);
         await expect(server.call({ type: 'work' })).rejects.toThrow(/timed out/);
     });

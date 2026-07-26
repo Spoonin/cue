@@ -48,15 +48,19 @@ exponential backoff guarantees — every restart lands alone inside its own wind
 never fills, and the budget stops bounding anything at exactly the moment it is needed most.
 Consecutive counting cannot be defeated this way, and it removes a parameter.
 
-## Deviation 4 — a timed-out `call` is not processed
+## Deviation 4 — a timed-out reply is not processed
 
 Erlang's `gen_server` settles a timed-out call on the caller's side but still processes the
 message when it reaches the head of the queue. This is a well-known trap: the caller is told
 the call failed while the handler goes on to perform the side effect.
 
 We mark the envelope abandoned and discard it without invoking the handler, so the caller's
-view and the server's state agree. For non-idempotent work — charging a card, decrementing
+view and the child's state agree. For non-idempotent work — charging a card, decrementing
 stock — the gen_server behaviour is a double-charge waiting to happen.
+
+This applies uniformly to `Server.call` and `Agent.get`/`getAndUpdate`, under one option name
+(`replyTimeoutMs`) rather than a per-primitive one, since it is a single concept. `Agent.update`
+is exempt: it is fire-and-forget, so there is no caller to time out.
 
 **Trade-off**: a requested state change is silently dropped rather than applied late. Dropping
 is recoverable by retrying; a phantom write is not.

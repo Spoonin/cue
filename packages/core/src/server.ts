@@ -18,7 +18,7 @@ export interface ServerOptions<State, Msg extends { type: string }> {
     // Deadline for call(), measured from invocation — not from when the message
     // starts draining — because that is what a caller means by "5s timeout".
     // Pass Infinity to wait forever.
-    callTimeoutMs?: number;
+    replyTimeoutMs?: number;
 }
 
 // Mailbox entry — wraps the raw message with an optional resolve for calls
@@ -47,7 +47,7 @@ export class Server<State, Msg extends { type: string }> implements Drainable, S
     #failedSinceCleanDrain = false;
     #suspended = false;
     readonly #initialState: State;
-    readonly #callTimeoutMs: number;
+    readonly #replyTimeoutMs: number;
 
     constructor(options: ServerOptions<State, Msg>) {
         this.id = options.id ?? nextId();
@@ -62,7 +62,7 @@ export class Server<State, Msg extends { type: string }> implements Drainable, S
         this.#crashHandler = options.crashHandler;
         this.#initialState = options.initialState;
         this.#state = options.initialState;
-        this.#callTimeoutMs = options.callTimeoutMs ?? 30_000;
+        this.#replyTimeoutMs = options.replyTimeoutMs ?? 30_000;
     }
 
     cast(msg: Msg): boolean {
@@ -85,12 +85,12 @@ export class Server<State, Msg extends { type: string }> implements Drainable, S
                 reject
             };
 
-            if (Number.isFinite(this.#callTimeoutMs)) {
+            if (Number.isFinite(this.#replyTimeoutMs)) {
                 const timer = setTimeout(() => {
                     envelope.abandoned = true;
                     envelope.timer = undefined;
                     const error = new Error(
-                        `Server ${this.id} call timed out after ${this.#callTimeoutMs}ms`
+                        `Server ${this.id} call timed out after ${this.#replyTimeoutMs}ms`
                     );
                     reject(error);
                     this.#crashHandler?.noteDeadLetter?.({
@@ -99,7 +99,7 @@ export class Server<State, Msg extends { type: string }> implements Drainable, S
                         error,
                         reason: 'timeout',
                     });
-                }, this.#callTimeoutMs);
+                }, this.#replyTimeoutMs);
                 timer.unref?.();
                 envelope.timer = timer;
             }

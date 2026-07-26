@@ -1,6 +1,6 @@
 import { describe, expect, it } from '@jest/globals';
 import { Agent } from "../src/agent";
-import { Crash, CrashHandler } from "../src/types";
+import { Crash, CrashHandler, DeadLetter } from "../src/types";
 
 // Agent is exercised directly here, so it needs the internal decider contract
 // rather than the root ErrorReporter a user would pass to a Supervisor.
@@ -141,4 +141,72 @@ describe('Agent', () => {
             expect(() => agent.update(state => state + 1)).toThrow(/stopped/);
         }
     );
+});
+describe('Agent reply timeouts', () => {
+    // Suspending holds the envelope in the mailbox deterministically, without
+    // depending on scheduler timing.
+    function suspendedAgent(replyTimeoutMs: number, crashHandler?: CrashHandler) {
+        const agent = new Agent(0, { replyTimeoutMs, crashHandler });
+        agent.suspend();
+        return agent;
+    }
+
+    it('rejects a get() that is not answered within replyTimeoutMs', async () => {
+        const agent = suspendedAgent(20);
+        await expect(agent.get(s => s)).rejects.toThrow(/timed out/);
+    });
+
+    it('rejects a getAndUpdate() that is not answered within replyTimeoutMs', async () => {
+        const agent = suspendedAgent(20);
+        await expect(agent.getAndUpdate(s => ({ state: s + 1, reply: s }))).rejects.toThrow(/timed out/);
+    });
+
+    it('never applies the update of a timed-out getAndUpdate, even once draining resumes', async () => {
+        const agent = suspendedAgent(20);
+
+        await expect(
+            agent.getAndUpdate(s => ({ state: s + 100, reply: s }))
+        ).rejects.toThrow(/timed out/);
+
+        agent.restart({ policy: 'resume' });
+        await new Promise(resolve => setTimeout(resolve, 40));
+
+        // the abandoned function was discarded, not run late behind the caller's back
+        expect(await agent.get(s => s)).toBe(0);
+    });
+
+    it('dead-letters a timed-out reply', async () => {
+        const letters: DeadLetter[] = [];
+        const crashHandler: CrashHandler = {
+            handleCrash: async () => 'drop',
+            noteDeadLetter: (letter) => { letters.push(letter); },
+        };
+
+        const agent = suspendedAgent(20, crashHandler);
+        await expect(agent.get(s => s)).rejects.toThrow(/timed out/);
+
+        expect(letters).toHaveLength(1);
+        expect(letters[0].reason).toBe('timeout');
+        expect(letters[0].childId).toBe(agent.id);
+    });
+
+    it('update() has no deadline — nobody is waiting on it', async () => {
+        const agent = suspendedAgent(20);
+
+        agent.update(s => s + 5);
+        await new Promise(resolve => setTimeout(resolve, 40)); // past the deadline
+
+        agent.restart({ policy: 'resume' });
+        expect(await agent.get(s => s)).toBe(5); // still applied
+    });
+
+    it('Infinity disables the deadline', async () => {
+        const agent = suspendedAgent(Infinity);
+
+        const pending = agent.get(s => s);
+        await new Promise(resolve => setTimeout(resolve, 40));
+
+        agent.restart({ policy: 'resume' });
+        await expect(pending).resolves.toBe(0);
+    });
 });

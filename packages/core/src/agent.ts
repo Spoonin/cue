@@ -7,16 +7,24 @@ function nextId(): string {
     return `agent-${_nextId++}`;
 }
 
-export interface AgentOptions { 
-    scheduler?: Scheduler, 
-    crashHandler?: CrashHandler, 
-    id?: string 
+export interface AgentOptions {
+    scheduler?: Scheduler,
+    crashHandler?: CrashHandler,
+    id?: string,
+    // Deadline for get()/getAndUpdate(), measured from the call. update() is
+    // fire-and-forget, so it has no deadline — nobody is waiting on it.
+    // Pass Infinity to wait forever.
+    replyTimeoutMs?: number,
 }
 
 type Envelope<State> = {
     fn: (state: State) => { state: State; reply?: unknown };
     resolve?: (value: unknown) => void;
     reject?: (reason: unknown) => void;
+    timer?: ReturnType<typeof setTimeout>;
+    // Set when the caller stopped waiting. drain() discards these without running
+    // the function, so a caller told "failed" never has its update applied late.
+    abandoned?: boolean;
 };
 
 
@@ -32,6 +40,7 @@ export class Agent<State> implements Drainable, Supervisable {
     #failedSinceCleanDrain = false;
     #suspended = false;
     readonly #mailbox: Mailbox<Envelope<State>>;
+    readonly #replyTimeoutMs: number;
     readonly ref: AgentRef<State>;
 
     constructor(initialState: State, options: AgentOptions = {}) {
@@ -40,9 +49,39 @@ export class Agent<State> implements Drainable, Supervisable {
         this.id = options.id ?? nextId();
         this.#scheduler = options.scheduler ?? DEFAULT_SCHEDULER;
         this.#crashHandler = options.crashHandler;
+        this.#replyTimeoutMs = options.replyTimeoutMs ?? 30_000;
         this.#mailbox = new Mailbox();
         this.ref = { id: this.id, get: this.get.bind(this), update: this.update.bind(this), getAndUpdate: this.getAndUpdate.bind(this) };
 
+    }
+
+    // The deadline runs from the call, so a replayed envelope stays on its
+    // original clock — a retry does not buy the caller extra time.
+    #armDeadline(envelope: Envelope<State>, reject: (reason: unknown) => void): void {
+        if (!Number.isFinite(this.#replyTimeoutMs)) return;
+        const timer = setTimeout(() => {
+            envelope.abandoned = true;
+            envelope.timer = undefined;
+            const error = new Error(
+                `Agent ${this.id} reply timed out after ${this.#replyTimeoutMs}ms`
+            );
+            reject(error);
+            this.#crashHandler?.noteDeadLetter?.({
+                childId: this.id,
+                message: envelope.fn,
+                error,
+                reason: 'timeout',
+            });
+        }, this.#replyTimeoutMs);
+        timer.unref?.();
+        envelope.timer = timer;
+    }
+
+    #clearTimer(envelope: Envelope<State>): void {
+        if (envelope.timer !== undefined) {
+            clearTimeout(envelope.timer);
+            envelope.timer = undefined;
+        }
     }
 
     get<R>(fn: (state: State) => R): Promise<R> {
@@ -50,8 +89,14 @@ export class Agent<State> implements Drainable, Supervisable {
             return Promise.reject(new Error(`Agent ${this.id} is stopped`));
         }
         return new Promise((resolve, reject) => {
-            this.#mailbox.push({fn: (state: State) => ({ state, reply: fn(state) }), resolve: resolve as (value: unknown) => void, reject});
-            this.#scheduler.enqueue(this);
+            const envelope: Envelope<State> = {
+                fn: (state: State) => ({ state, reply: fn(state) }),
+                resolve: resolve as (value: unknown) => void,
+                reject,
+            };
+            this.#armDeadline(envelope, reject);
+            this.#mailbox.push(envelope);
+            if (!this.#suspended) this.#scheduler.enqueue(this);
         });
     }
 
@@ -68,8 +113,14 @@ export class Agent<State> implements Drainable, Supervisable {
             return Promise.reject(new Error(`Agent ${this.id} is stopped`));
         }
         return new Promise((resolve, reject) => {
-            this.#mailbox.push({fn, resolve: resolve as (value: unknown) => void, reject});
-            this.#scheduler.enqueue(this);
+            const envelope: Envelope<State> = {
+                fn,
+                resolve: resolve as (value: unknown) => void,
+                reject,
+            };
+            this.#armDeadline(envelope, reject);
+            this.#mailbox.push(envelope);
+            if (!this.#suspended) this.#scheduler.enqueue(this);
         });
     }
 
@@ -80,9 +131,14 @@ export class Agent<State> implements Drainable, Supervisable {
         const envelope = this.#mailbox.pull();
         if (!envelope) return false;
 
+        // The caller already gave up and was rejected. Running the function now
+        // would apply a state change nobody is waiting for.
+        if (envelope.abandoned) return !this.#mailbox.isEmpty;
+
         try {
             const result = envelope.fn(this.#state);
             this.#state = result.state;
+            this.#clearTimer(envelope);
             if (envelope.resolve) {
                 envelope.resolve(result.reply);
             }
@@ -101,9 +157,14 @@ export class Agent<State> implements Drainable, Supervisable {
                     message: envelope.fn,
                     previousState: this.#state,
                 });
-                if (directive === 'replay') this.#mailbox.pushFront(envelope);
-                else envelope.reject?.(error);
+                if (directive === 'replay') {
+                    this.#mailbox.pushFront(envelope); // timer keeps running
+                } else {
+                    this.#clearTimer(envelope);
+                    envelope.reject?.(error);
+                }
             } else {
+                this.#clearTimer(envelope);
                 envelope.reject?.(error);
             }
         }
@@ -113,7 +174,8 @@ export class Agent<State> implements Drainable, Supervisable {
     #rejectPendingEnvelopes(): void {
         const pendingEnvelopes = this.#mailbox.drainAll();
         for (const envelope of pendingEnvelopes) {
-            if (envelope.reject) {
+            this.#clearTimer(envelope);
+            if (envelope.reject && !envelope.abandoned) {
                 envelope.reject(new Error(`Agent ${this.id} is stopped`));
             }
         }
