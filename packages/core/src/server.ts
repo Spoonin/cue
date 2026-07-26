@@ -1,7 +1,7 @@
 
 import { Mailbox } from "./mailbox.js";
 import { Scheduler, DEFAULT_SCHEDULER } from "./scheduler.js";
-import { CallMsg, CrashHandler, DistributiveOmit, Drainable, Handlers, RestartOptions, ServerRef, Supervisable } from "./types.js";
+import { CallMsg, CrashHandler, DistributiveOmit, Drainable, DeadLetterReason, Handlers, RestartOptions, ServerRef, Supervisable } from "./types.js";
 
 let _nextId = 0;
 function nextId(): string {
@@ -199,18 +199,28 @@ export class Server<State, Msg extends { type: string }> implements Drainable, S
         }
     }
 
-    #rejectPendingEnvelopes(): void {
+    // Discard everything queued. Callers are rejected AND the messages are
+    // dead-lettered — a rejected promise tells the caller, the hook tells the
+    // operator, and cast() messages have no caller to tell at all.
+    #discardPending(reason: DeadLetterReason): void {
         const pendingEnvelopes = this.#mailbox.drainAll();
         for (const envelope of pendingEnvelopes) {
             this.#clearTimer(envelope);
-            if (envelope.reject && !envelope.abandoned) {
-                envelope.reject(new Error(`Server ${this.id} is stopped`));
-            }
+            if (envelope.abandoned) continue; // already dead-lettered when it timed out
+
+            const error = new Error(`Server ${this.id} is stopped`);
+            if (envelope.reject) envelope.reject(error);
+            this.#crashHandler?.noteDeadLetter?.({
+                childId: this.id,
+                message: envelope.msg,
+                error,
+                reason,
+            });
         }
     }
     stop(): void {
         this.#stopped = true;
-        this.#rejectPendingEnvelopes();
+        this.#discardPending('retired');
     }
 
     // Keep queueing, stop draining. Cleared by restart().
@@ -226,7 +236,7 @@ export class Server<State, Msg extends { type: string }> implements Drainable, S
         this.#suspended = false;
 
         if (policy === 'reset') {
-            this.#rejectPendingEnvelopes();
+            this.#discardPending('dropped'); // reset is destructive, but not silent
             this.#state = this.#initialState;
         } else if (opts && 'state' in opts) {
             this.#state = opts.state as State;

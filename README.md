@@ -126,7 +126,7 @@ Handlers for `cast` messages return the new `State` directly; handlers for `call
 
 **All actors share one scheduler unless you pass your own.** `DEFAULT_SCHEDULER` (`throughput: 100`, `tickBudget: 16ms`) is a module-level singleton (`src/scheduler.ts:78`), so unrelated actors in the same process compete for the same tick budget. Pass a dedicated `Scheduler` (as in `examples/fair-scheduling.ts`) if one actor's message volume shouldn't starve another's.
 
-**`Server`/`Agent` reject in-flight `call`/`get` promises on stop, and on a `reset` restart**, with `Error("... is stopped")`. Under `resume` and `replay` those queued promises survive the restart instead — only `reset` is destructive.
+**`stop()` is hard, and destructive restarts are loud.** Stopping a child discards whatever is still queued — it does *not* finish the backlog first — and every discarded message goes to `onDeadLetter`. Waiting `call`/`get` callers are additionally rejected with `Error("... is stopped")`. A `reset` restart is destructive in the same way; `resume` and `replay` keep the queue, so work sitting behind a failure survives.
 
 **`Registry` holds `WeakRef`s.** A registered actor can be garbage-collected once nothing else references its `ActorRef`, silently removing it from the registry (`src/registry.ts:16-19`). Keep a strong reference to any actor you expect `Registry.lookup` to keep finding.
 

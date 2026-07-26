@@ -1,6 +1,6 @@
 import { Mailbox } from "./mailbox.js";
 import { Scheduler, DEFAULT_SCHEDULER } from "./scheduler.js";
-import { AgentRef, CrashHandler, Drainable, RestartOptions, Supervisable } from "./types.js";
+import { AgentRef, CrashHandler, DeadLetterReason, Drainable, RestartOptions, Supervisable } from "./types.js";
 
 let _nextId = 0;
 function nextId(): string {
@@ -171,19 +171,28 @@ export class Agent<State> implements Drainable, Supervisable {
         return !this.#mailbox.isEmpty;
     }
 
-    #rejectPendingEnvelopes(): void {
+    // See Server — callers are rejected AND the work is dead-lettered, since
+    // update() has no caller to reject.
+    #discardPending(reason: DeadLetterReason): void {
         const pendingEnvelopes = this.#mailbox.drainAll();
         for (const envelope of pendingEnvelopes) {
             this.#clearTimer(envelope);
-            if (envelope.reject && !envelope.abandoned) {
-                envelope.reject(new Error(`Agent ${this.id} is stopped`));
-            }
+            if (envelope.abandoned) continue; // already dead-lettered when it timed out
+
+            const error = new Error(`Agent ${this.id} is stopped`);
+            if (envelope.reject) envelope.reject(error);
+            this.#crashHandler?.noteDeadLetter?.({
+                childId: this.id,
+                message: envelope.fn,
+                error,
+                reason,
+            });
         }
     }
 
     stop(): void {
         this.#stopped = true;
-        this.#rejectPendingEnvelopes();
+        this.#discardPending('retired');
     }
 
     // Keep queueing, stop draining. Cleared by restart().
@@ -198,7 +207,7 @@ export class Agent<State> implements Drainable, Supervisable {
 
         if (policy === 'reset') {
             this.#state = this.#initialState;
-            this.#rejectPendingEnvelopes();
+            this.#discardPending('dropped'); // reset is destructive, but not silent
         } else if (opts && 'state' in opts) {
             this.#state = opts.state as State;
         }

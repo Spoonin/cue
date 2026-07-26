@@ -35,7 +35,9 @@ export type DeadLetterReason =
 export interface DeadLetter {
     childId: string;
     message: unknown;
-    error: unknown;
+    // Absent when nothing went wrong with this particular message — it was simply
+    // queued behind a failure and discarded when its child stopped.
+    error?: unknown;
     reason: DeadLetterReason;
 }
 

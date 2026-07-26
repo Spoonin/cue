@@ -1,6 +1,6 @@
 import { Mailbox } from "./mailbox.js";
 import { DEFAULT_SCHEDULER, Scheduler } from "./scheduler.js";
-import { ActorFn, ActorOptions, ActorRef, CrashHandler, Drainable, RestartOptions, Supervisable } from "./types.js";
+import { ActorFn, ActorOptions, ActorRef, CrashHandler, DeadLetterReason, Drainable, RestartOptions, Supervisable } from "./types.js";
 
 export type { ActorFn, ActorOptions, ActorRef, Drainable };
 
@@ -54,7 +54,7 @@ export class Actor<State, Msg> implements Drainable, Supervisable {
 
         if (policy === 'reset') {
             this.#state = this.#initState;
-            this.#mailbox.clear();
+            this.#discardPending('dropped'); // reset is destructive, but not silent
         } else if (opts && 'state' in opts) {
             this.#state = opts.state as State;
         }
@@ -82,9 +82,22 @@ export class Actor<State, Msg> implements Drainable, Supervisable {
         return result;
     }
 
-    // soft stop — stops processing new messages, but drains the mailbox first.
+    // Hard stop: nothing further is processed, and whatever is still queued is
+    // dead-lettered rather than left to rot in a mailbox nobody will drain.
+    // Server and Agent behave identically.
     stop(): void {
         this.#stopped = true;
+        this.#discardPending('retired');
+    }
+
+    #discardPending(reason: DeadLetterReason): void {
+        if (this.#mailbox.isEmpty) return;
+        const pending = this.#mailbox.drainAll();
+        const notify = this.crashHandler?.noteDeadLetter;
+        if (!notify) return;
+        for (const message of pending) {
+            notify.call(this.crashHandler, { childId: this.id, message, reason });
+        }
     }
 
     // Keep queueing, stop draining. Cleared by restart().
@@ -106,6 +119,7 @@ export class Actor<State, Msg> implements Drainable, Supervisable {
 
     // Called by the Scheduler — processes one message, returns true if more remain.
     async drain(): Promise<boolean> {
+        if (this.#stopped) return false;
         if (this.#suspended) return false; // backing off — restart() will re-enqueue us
 
         const msg = this.#mailbox.pull();
