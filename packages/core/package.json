@@ -24,10 +24,11 @@
   },
   "devDependencies": {
     "@jest/globals": "^30.3.0",
+    "@swc/core": "^1.15.46",
+    "@swc/jest": "^0.2.39",
     "@types/jest": "^30.0.0",
     "@types/node": "^25.5.0",
     "jest": "^30.3.0",
-    "ts-jest": "^29.4.6",
     "tsup": "^8.0.0",
     "typescript": "^7.0.0"
   },

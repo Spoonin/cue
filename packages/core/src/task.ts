@@ -1,5 +1,5 @@
 import { DEFAULT_SCHEDULER, Scheduler } from "./scheduler.js";
-import { Drainable, Supervisable } from "./types.js";
+import { Drainable, RestartOptions, Supervisable } from "./types.js";
 
 let _nextId = 0;
 function nextId(): string {
@@ -62,7 +62,14 @@ export class Task<T> implements Drainable, Supervisable {
         this.#reject?.(new Error(`Task ${this.id} was stopped`));
     }
 
-    restart(): void {
-        // Task is temporary — restart is a no-op or throws
+    // A task runs once and its promise has already settled — there is nothing to
+    // back off from.
+    suspend(): void {
+        // no-op
+    }
+
+    restart(_opts?: RestartOptions): void {
+        // Task is temporary — its promise has already settled, so there is nothing
+        // to restore and no message to replay. Policy is deliberately ignored.
     }
 }

@@ -30,7 +30,7 @@ const counter = spawn<State, Msg>(
 counter.send({ type: "increment" });
 ```
 
-`spawn` runs unsupervised: if the handler throws, the actor stops itself and logs the error (`packages/core/src/actor.ts:96-105`). For anything you want restarted on crash, spawn under a `Supervisor` instead.
+`spawn` runs unsupervised: if the handler throws, the actor stops itself and logs the error (`packages/core/src/actor.ts:139-143`). For anything you want restarted on crash, spawn under a `Supervisor` instead.
 
 ## Core building blocks
 
@@ -39,23 +39,56 @@ counter.send({ type: "increment" });
 | `Actor` (`spawn`) | fire-and-forget state + `send()` | `src/actor.ts` |
 | `Server` (`spawnServer`) | request/reply (`call`) alongside fire-and-forget (`cast`) | `src/server.ts` |
 | `Agent` (`spawnAgent`) | a bare mutable cell (`get`/`update`) with no message-type ceremony | `src/agent.ts` |
-| `Supervisor` | crash isolation + restart strategy for a group of children | `src/supervisor.ts` |
+| `Supervisor` | crash isolation, restart policy, and backoff for a group of children | `src/supervisor.ts` |
 | `Registry` | look up an actor ref by name instead of passing refs around | `src/registry.ts` |
 
 ### Supervisor: crash isolation
+
+Supervision has two independent axes. **Scope** says *who* a crash affects; **policy** says *what happens* to them.
 
 ```typescript
 import { Supervisor } from "@cue/core";
 
 const system = new Supervisor(
-  { handleCrash: async (err) => console.error("root crash:", err) },
-  { strategy: "restartOne" } // 'restartOne' | 'restartAll' | 'restartRest' | 'escalate'
+  { onError: ({ childId, error }) => console.error(`[${childId}]`, error) },
+  {
+    scope: "one",      // 'one' | 'all' | 'rest'
+    policy: "reset",   // 'reset' | 'resume' | 'replay' | 'stop' | 'escalate'
+    onDeadLetter: ({ message, reason }) => console.warn("undelivered:", reason, message),
+  }
 );
 
 const worker = system.spawn<State, Msg>(handler, { initialState: { count: 0 } });
 ```
 
-Every `Supervisor` needs a `CrashHandler` in its constructor — there's no default, because someone has to own errors that reach the top (`src/supervisor.ts:25-27`). Use `escalate` on a child supervisor to hand a crash up to its parent instead of restarting locally.
+| Policy | State | The message that crashed |
+|---|---|---|
+| `reset` | back to `initialState` | dropped |
+| `resume` | kept as it was before the failed message | dropped |
+| `replay` | kept | redelivered at the head of the mailbox |
+| `stop` | child is retired, not restarted | dropped |
+| `escalate` | handed to the parent; `scope` is ignored | parent decides |
+
+Every `Supervisor` needs an `ErrorReporter` in its constructor — there's no default, because someone has to own errors that reach the top (`src/supervisor.ts:74-76`).
+
+**Crashes are only reported to `onError` under `escalate`.** Any restart policy handles the crash locally and tells nobody. Use `onDeadLetter` if you want to see failures a supervisor absorbed — it fires for every message that will never be delivered, with a `reason` of `dropped`, `poison`, `retired`, or `timeout`.
+
+### Keeping restarts bounded
+
+A child that keeps failing is restarted with exponential backoff, and retired once it exceeds its budget:
+
+```typescript
+new Supervisor(reporter, {
+  policy: "replay",
+  maxRestarts: 5,   // consecutive; a clean drain resets the count
+  maxAttempts: 3,   // redeliveries of one message before it's treated as poison
+  backoff: { initialMs: 100, maxMs: 30_000, factor: 2, jitter: true }, // or 'none'
+});
+```
+
+The budget counts **consecutive** restarts rather than restarts-per-time-window, because backoff defeats a window: once the delay exceeds it, every restart lands alone in its own window and the budget silently stops bounding anything. One message processed without throwing resets the count instead.
+
+While backing off, a child is **suspended** — it still accepts messages, it just doesn't process them. See `docs/adr/002-crash-recovery-model.md` for why this isn't simply a sleep.
 
 ### Server: request/reply
 
@@ -83,13 +116,17 @@ Handlers for `cast` messages return the new `State` directly; handlers for `call
 
 ## Non-obvious behaviors
 
-**`send()` never drops a message, even past the high watermark.** `highWatermark` is a backpressure *signal*, not a limit — `send()` still enqueues and returns `false` so the caller knows to slow down (`src/mailbox.ts:18-24`). If you need sends to actually be rejected when the mailbox is full, use `trySend()` instead, which checks capacity *before* enqueuing (`src/actor.ts:59-66`).
+**`send()` never drops a message, even past the high watermark.** `highWatermark` is a backpressure *signal*, not a limit — `send()` still enqueues and returns `false` so the caller knows to slow down (`src/mailbox.ts:18-24`). If you need sends to actually be rejected when the mailbox is full, use `trySend()` instead, which checks capacity *before* enqueuing (`src/actor.ts:76-83`).
 
-**Restart resets state to the original `initialState`, not the last good state before the crash.** There's no crash-recovery replay — `restart()` on an `Actor`, `Server`, or `Agent` all reinitialize from scratch (`src/actor.ts:43-48`, `src/server.ts:134-139`).
+**Restart resets state to `initialState` *by default*.** That's `policy: 'reset'`, chosen deliberately: resuming with the state that caused a crash tends to re-crash, which is Erlang's original insight. Use `resume` or `replay` when a failure is more likely transient than structural.
+
+**A timed-out reply never runs its handler.** `replyTimeoutMs` (30s default) applies to `Server.call` and to `Agent.get`/`getAndUpdate`, measured from the call — not from when the message starts draining, since queue depth and backoff are part of what a caller is waiting through. On expiry the message is discarded rather than processed, so a caller told "failed" can't have its side effect applied late. Erlang's `gen_server` does the opposite; see ADR 002 for why we didn't. Pass `Infinity` to wait forever.
+
+`Agent.update` has no deadline — it's fire-and-forget, so nobody is waiting on it.
 
 **All actors share one scheduler unless you pass your own.** `DEFAULT_SCHEDULER` (`throughput: 100`, `tickBudget: 16ms`) is a module-level singleton (`src/scheduler.ts:78`), so unrelated actors in the same process compete for the same tick budget. Pass a dedicated `Scheduler` (as in `examples/fair-scheduling.ts`) if one actor's message volume shouldn't starve another's.
 
-**`Server`/`Agent` reject in-flight `call`/`get` promises on stop or restart**, with `Error("... is stopped")` — callers awaiting a reply at that moment need to handle the rejection, not assume the promise hangs forever (`src/server.ts:121-132`, `src/agent.ts:96-103`).
+**`stop()` is hard, and destructive restarts are loud.** Stopping a child discards whatever is still queued — it does *not* finish the backlog first — and every discarded message goes to `onDeadLetter`. Waiting `call`/`get` callers are additionally rejected with `Error("... is stopped")`. A `reset` restart is destructive in the same way; `resume` and `replay` keep the queue, so work sitting behind a failure survives.
 
 **`Registry` holds `WeakRef`s.** A registered actor can be garbage-collected once nothing else references its `ActorRef`, silently removing it from the registry (`src/registry.ts:16-19`). Keep a strong reference to any actor you expect `Registry.lookup` to keep finding.
 
@@ -108,6 +145,10 @@ Run an example directly with `tsx`:
 pnpm example examples/ping-pong.ts
 ```
 
+Note that `__tests__` is outside the `tsconfig.json` `include`, and jest transpiles via swc without type checking — so **test files are not type-checked by anything**. `pnpm typecheck` covers `src` only.
+
 ## Further reading
 
+- `CONTEXT.md` — the vocabulary this project commits to (scope vs policy vs directive, suspended vs stopped, and so on).
 - `docs/adr/001-supervisor-init.md` — why the supervisor API is imperative (`spawn`/`spawnSupervisor`) rather than a declarative child spec.
+- `docs/adr/002-crash-recovery-model.md` — the four places this deliberately diverges from OTP and Akka, and why.
