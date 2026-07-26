@@ -15,6 +15,10 @@ export interface ServerOptions<State, Msg extends { type: string }> {
     crashHandler?: CrashHandler;
     id?: string;
     highWatermark?: number;
+    // Deadline for call(), measured from invocation — not from when the message
+    // starts draining — because that is what a caller means by "5s timeout".
+    // Pass Infinity to wait forever.
+    callTimeoutMs?: number;
 }
 
 // Mailbox entry — wraps the raw message with an optional resolve for calls
@@ -22,6 +26,12 @@ type Envelope<Msg> = {
     msg: Msg;
     resolve?: (value: unknown) => void;
     reject?: (reason: unknown) => void;
+    timer?: ReturnType<typeof setTimeout>;
+    // Set when the caller stopped waiting. drain() discards these WITHOUT running
+    // the handler: the caller has already been told it failed, so running it
+    // anyway would mutate state behind their back. Erlang's gen_server does run
+    // it, which is how a timed-out call still charges the card.
+    abandoned?: boolean;
 };
 
 export class Server<State, Msg extends { type: string }> implements Drainable, Supervisable {
@@ -37,6 +47,7 @@ export class Server<State, Msg extends { type: string }> implements Drainable, S
     #failedSinceCleanDrain = false;
     #suspended = false;
     readonly #initialState: State;
+    readonly #callTimeoutMs: number;
 
     constructor(options: ServerOptions<State, Msg>) {
         this.id = options.id ?? nextId();
@@ -51,6 +62,7 @@ export class Server<State, Msg extends { type: string }> implements Drainable, S
         this.#crashHandler = options.crashHandler;
         this.#initialState = options.initialState;
         this.#state = options.initialState;
+        this.#callTimeoutMs = options.callTimeoutMs ?? 30_000;
     }
 
     cast(msg: Msg): boolean {
@@ -72,11 +84,40 @@ export class Server<State, Msg extends { type: string }> implements Drainable, S
                 resolve,
                 reject
             };
+
+            if (Number.isFinite(this.#callTimeoutMs)) {
+                const timer = setTimeout(() => {
+                    envelope.abandoned = true;
+                    envelope.timer = undefined;
+                    const error = new Error(
+                        `Server ${this.id} call timed out after ${this.#callTimeoutMs}ms`
+                    );
+                    reject(error);
+                    this.#crashHandler?.noteDeadLetter?.({
+                        childId: this.id,
+                        message: envelope.msg,
+                        error,
+                        reason: 'timeout',
+                    });
+                }, this.#callTimeoutMs);
+                timer.unref?.();
+                envelope.timer = timer;
+            }
+
             this.#mailbox.push(envelope);
-            this.#scheduler.enqueue(this);
+            if (!this.#suspended) this.#scheduler.enqueue(this);
         });
-        
+
         return promise;
+    }
+
+    // The deadline runs from call(), so a replayed message stays on its original
+    // clock — a retry does not buy the caller extra time.
+    #clearTimer(envelope: Envelope<Msg>): void {
+        if (envelope.timer !== undefined) {
+            clearTimeout(envelope.timer);
+            envelope.timer = undefined;
+        }
     }
 
     async drain(): Promise<boolean> {
@@ -86,6 +127,10 @@ export class Server<State, Msg extends { type: string }> implements Drainable, S
         const envelope = this.#mailbox.pull();
         if (!envelope) return false;
 
+        // The caller already gave up and was rejected. Running the handler now
+        // would apply a state change nobody is waiting for.
+        if (envelope.abandoned) return this.#mailbox.count > 0;
+
         const handler = this.#handlers[envelope.msg.type as Msg['type']];
 
         if(envelope.resolve) {
@@ -93,6 +138,7 @@ export class Server<State, Msg extends { type: string }> implements Drainable, S
             try {
                 const { state, reply } = await callHandler(this.#state, envelope.msg);
                 this.#state = state;
+                this.#clearTimer(envelope);
                 envelope.resolve(reply);
                 this.#noteCleanDrain();
             } catch (err) {
@@ -107,9 +153,14 @@ export class Server<State, Msg extends { type: string }> implements Drainable, S
                         message: envelope.msg,
                         previousState: this.#state,
                     });
-                    if (directive === 'replay') this.#mailbox.pushFront(envelope);
-                    else envelope.reject?.(err);
+                    if (directive === 'replay') {
+                        this.#mailbox.pushFront(envelope); // timer keeps running
+                    } else {
+                        this.#clearTimer(envelope);
+                        envelope.reject?.(err);
+                    }
                 } else {
+                    this.#clearTimer(envelope);
                     this.stop();
                     envelope.reject?.(err);
                     console.error(`Server ${this.id} crashed processing message`, envelope.msg, 'with error', err);
@@ -151,7 +202,8 @@ export class Server<State, Msg extends { type: string }> implements Drainable, S
     #rejectPendingEnvelopes(): void {
         const pendingEnvelopes = this.#mailbox.drainAll();
         for (const envelope of pendingEnvelopes) {
-            if (envelope.reject) {
+            this.#clearTimer(envelope);
+            if (envelope.reject && !envelope.abandoned) {
                 envelope.reject(new Error(`Server ${this.id} is stopped`));
             }
         }

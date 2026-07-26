@@ -90,6 +90,10 @@ export class Supervisor implements CrashHandler, Supervisable {
         this.#budgets.delete(childId);
     }
 
+    noteDeadLetter(letter: DeadLetter): void {
+        this.#onDeadLetter?.(letter);
+    }
+
     // Spawn a child actor under this supervisor.
     spawn<State, Msg>(
         fn: ActorFn<State, Msg>,

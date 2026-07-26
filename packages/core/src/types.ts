@@ -73,6 +73,10 @@ export interface CrashHandler {
     // resets its restart budget. Children only call this if they have crashed
     // since the last clean drain, so the healthy path stays a boolean test.
     noteCleanDrain?(childId: string): void;
+
+    // For messages a child abandons on its own, without a crash — a call() whose
+    // caller timed out. Routed here so it reaches the same onDeadLetter hook.
+    noteDeadLetter?(letter: DeadLetter): void;
 }
 
 // What a caller passes to the root Supervisor: a terminal reporter, not a decider.

@@ -1,7 +1,7 @@
 import { describe, expect, it } from '@jest/globals';
 import { Supervisor } from "../src/supervisor";
 import { Server } from "../src/server";
-import { Crash, ErrorReporter } from "../src/types";
+import { Crash, CrashHandler, DeadLetter, ErrorReporter } from "../src/types";
 
 describe('Server', () => {
     it('performs cast and call', async () =>{
@@ -148,4 +148,70 @@ describe('Server', () => {
             expect(() => server.cast({ type: 'get', reply: 0 })).toThrow(/stopped/);
         }
     );
+});
+
+describe('Server call timeouts', () => {
+    type Msg = { type: 'work'; reply: string };
+
+    // Suspending is the deterministic way to hold a message in the mailbox long
+    // enough to time out, without depending on scheduler timing.
+    function suspendedServer(callTimeoutMs: number, crashHandler?: CrashHandler) {
+        let ran = false;
+        const server = new Server<number, Msg>({
+            initialState: 0,
+            callTimeoutMs,
+            crashHandler,
+            handlers: {
+                work: (state) => { ran = true; return { state, reply: 'done' }; },
+            },
+        });
+        server.suspend();
+        return { server, ran: () => ran };
+    }
+
+    it('rejects a call that is not processed within callTimeoutMs', async () => {
+        const { server } = suspendedServer(20);
+        await expect(server.call({ type: 'work' })).rejects.toThrow(/timed out/);
+    });
+
+    it('never runs the handler for a timed-out call, even once draining resumes', async () => {
+        const { server, ran } = suspendedServer(20);
+
+        await expect(server.call({ type: 'work' })).rejects.toThrow(/timed out/);
+        expect(ran()).toBe(false);
+
+        // resume draining — the abandoned envelope is still sitting in the mailbox
+        server.restart({ policy: 'resume' });
+        await new Promise(resolve => setTimeout(resolve, 40));
+
+        // Erlang's gen_server would have run it here and mutated state behind a
+        // caller that was already told the call failed.
+        expect(ran()).toBe(false);
+    });
+
+    it('dead-letters a timed-out call with reason "timeout"', async () => {
+        const letters: DeadLetter[] = [];
+        const crashHandler: CrashHandler = {
+            handleCrash: async () => 'drop',
+            noteDeadLetter: (letter) => { letters.push(letter); },
+        };
+
+        const { server } = suspendedServer(20, crashHandler);
+        await expect(server.call({ type: 'work' })).rejects.toThrow(/timed out/);
+
+        expect(letters).toHaveLength(1);
+        expect(letters[0].reason).toBe('timeout');
+        expect(letters[0].message).toEqual({ type: 'work' });
+    });
+
+    it('Infinity disables the deadline', async () => {
+        const { server, ran } = suspendedServer(Infinity);
+
+        const pending = server.call({ type: 'work' });
+        await new Promise(resolve => setTimeout(resolve, 40)); // well past any default
+
+        server.restart({ policy: 'resume' });
+        await expect(pending).resolves.toBe('done');
+        expect(ran()).toBe(true);
+    });
 });
