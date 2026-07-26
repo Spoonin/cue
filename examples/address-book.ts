@@ -15,7 +15,7 @@ type Msg =
 | { type: 'updateContact', email: string, updatedInfo: Partial<Contact>, reply: Contact | null }
 | { type: 'clearContacts' }
 
-const system = new Supervisor({handleCrash: async (e) => console.error(e)});
+const system = new Supervisor({ onError: ({ childId, error }) => console.error(`[${childId}] crashed:`, error) });
 
 const server = system.spawnServer<State, Msg>({
     initialState: { contacts: {} },

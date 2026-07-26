@@ -1,7 +1,7 @@
 
 import { Mailbox } from "./mailbox.js";
 import { Scheduler, DEFAULT_SCHEDULER } from "./scheduler.js";
-import { CallMsg, CrashHandler, DistributiveOmit, Drainable, Handlers, ServerRef, Supervisable } from "./types.js";
+import { CallMsg, CrashHandler, DistributiveOmit, Drainable, Handlers, RestartOptions, ServerRef, Supervisable } from "./types.js";
 
 let _nextId = 0;
 function nextId(): string {
@@ -92,8 +92,17 @@ export class Server<State, Msg extends { type: string }> implements Drainable, S
                 envelope.resolve(reply);
             } catch (err) {
                 if (this.#crashHandler) {
-                    await this.#crashHandler.handleCrash(this.id, err, envelope.msg, this.#state);
-                    envelope.reject?.(err);
+                    // The envelope is already pulled, so its resolvers are still ours to
+                    // keep. On replay we re-queue it intact rather than rejecting, and the
+                    // caller's promise stays open across the restart.
+                    const directive = await this.#crashHandler.handleCrash({
+                        childId: this.id,
+                        error: err,
+                        message: envelope.msg,
+                        previousState: this.#state,
+                    });
+                    if (directive === 'replay') this.#mailbox.pushFront(envelope);
+                    else envelope.reject?.(err);
                 } else {
                     this.stop();
                     envelope.reject?.(err);
@@ -107,7 +116,13 @@ export class Server<State, Msg extends { type: string }> implements Drainable, S
                 this.#state = newState as State;
             } catch (err) {
                 if (this.#crashHandler) {
-                    await this.#crashHandler.handleCrash(this.id, err, envelope.msg, this.#state);
+                    const directive = await this.#crashHandler.handleCrash({
+                        childId: this.id,
+                        error: err,
+                        message: envelope.msg,
+                        previousState: this.#state,
+                    });
+                    if (directive === 'replay') this.#mailbox.pushFront(envelope);
                 } else {
                     this.stop();
                     console.error(`Server ${this.id} crashed processing message`, envelope.msg, 'with error', err);
@@ -115,7 +130,7 @@ export class Server<State, Msg extends { type: string }> implements Drainable, S
             }
         }
 
-        return this.#mailbox.count > 0; 
+        return this.#mailbox.count > 0;
 
     }
     #rejectPendingEnvelopes(): void {
@@ -131,10 +146,19 @@ export class Server<State, Msg extends { type: string }> implements Drainable, S
         this.#rejectPendingEnvelopes();
     }
 
-    restart(): void {
+    // Only `reset` discards queued work. Under resume/replay the pending envelopes —
+    // and the call() promises they carry — survive the restart untouched.
+    restart(opts?: RestartOptions): void {
+        const policy = opts?.policy ?? 'reset';
         this.#stopped = false;
-        this.#rejectPendingEnvelopes();
+
+        if (policy === 'reset') {
+            this.#rejectPendingEnvelopes();
+            this.#state = this.#initialState;
+        } else if (opts && 'state' in opts) {
+            this.#state = opts.state as State;
+        }
+
         this.#scheduler.enqueue(this);
-        this.#state = this.#initialState;
     }
 }

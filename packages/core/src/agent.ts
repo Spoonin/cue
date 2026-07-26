@@ -1,6 +1,6 @@
 import { Mailbox } from "./mailbox.js";
 import { Scheduler, DEFAULT_SCHEDULER } from "./scheduler.js";
-import { AgentRef, CrashHandler, Drainable, Supervisable } from "./types.js";
+import { AgentRef, CrashHandler, Drainable, RestartOptions, Supervisable } from "./types.js";
 
 let _nextId = 0;
 function nextId(): string {
@@ -83,11 +83,19 @@ export class Agent<State> implements Drainable, Supervisable {
                 envelope.resolve(result.reply);
             }
         } catch (error) {
-            if (envelope.reject) {
-                envelope.reject(error);
-            }
+            // Ask the supervisor BEFORE settling the caller's promise — on replay we
+            // re-queue the envelope with its resolvers intact instead of rejecting.
             if (this.#crashHandler) {
-                await this.#crashHandler.handleCrash(this.id, error, null, this.#state);
+                const directive = await this.#crashHandler.handleCrash({
+                    childId: this.id,
+                    error,
+                    message: envelope.fn,
+                    previousState: this.#state,
+                });
+                if (directive === 'replay') this.#mailbox.pushFront(envelope);
+                else envelope.reject?.(error);
+            } else {
+                envelope.reject?.(error);
             }
         }
         return !this.#mailbox.isEmpty;
@@ -107,9 +115,17 @@ export class Agent<State> implements Drainable, Supervisable {
         this.#rejectPendingEnvelopes();
     }
 
-    restart(): void {
+    restart(opts?: RestartOptions): void {
+        const policy = opts?.policy ?? 'reset';
         this.#stopped = false;
-        this.#state = this.#initialState;
-        this.#rejectPendingEnvelopes();
+
+        if (policy === 'reset') {
+            this.#state = this.#initialState;
+            this.#rejectPendingEnvelopes();
+        } else if (opts && 'state' in opts) {
+            this.#state = opts.state as State;
+        }
+
+        this.#scheduler.enqueue(this);
     }
 }

@@ -6,7 +6,7 @@ type Msg = { type: 'increment' }
 
 const scheduler = new Scheduler(5, 20); // process up to 20 messages per tick, or yield after 1000ms
 
-const system = new Supervisor({handleCrash: async (e) => console.error(e)}, { scheduler });
+const system = new Supervisor({ onError: ({ childId, error }) => console.error(`[${childId}] crashed:`, error) }, { scheduler });
 
 const actorA = system.spawn<State, Msg>((state, msg) => {
     console.log(`Actor A received ${msg.type} message`);

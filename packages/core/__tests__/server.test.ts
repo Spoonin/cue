@@ -1,7 +1,7 @@
 import { describe, expect, it } from '@jest/globals';
 import { Supervisor } from "../src/supervisor";
 import { Server } from "../src/server";
-import { CrashHandler } from "../src/types";
+import { Crash, ErrorReporter } from "../src/types";
 
 describe('Server', () => {
     it('performs cast and call', async () =>{
@@ -46,34 +46,29 @@ describe('Server', () => {
         expect(finalState).toBe('barfoofoo');
     });
 
-    it('should pass crash information to the supervisor handler on error', async () => {
-        let crashedErr: unknown;
-        const crashHandler: CrashHandler = {
-            handleCrash: async (id, err, msg, prevState) => {
-                crashedErr = { id, err, msg, prevState };
-            }
-        };
+    it('should pass crash information to the root reporter on error', async () => {
+        let seen: Crash | undefined;
+        const reporter: ErrorReporter = { onError: (crash) => { seen = crash; } };
 
-        
-        const supervisor = new Supervisor(crashHandler, {strategy: 'escalate'});
+        const supervisor = new Supervisor(reporter, { policy: 'escalate' });
 
         type Msg = { type: 'crash'; reply: number };
-        
+
         const server = supervisor.spawnServer<number, Msg>({initialState: 0, handlers: {
             crash: () => { throw new Error('Crash!') },
         }});
-        
+
         try {
             await server.call({ type: 'crash' });
         } catch (e) {
             expect(e).toBeInstanceOf(Error);
         }
 
-        expect(crashedErr).toBeDefined();
-        expect((crashedErr as any).err).toBeInstanceOf(Error);
-        expect((crashedErr as any).err.message).toBe('Crash!');
-        expect((crashedErr as any).msg).toEqual({ type: 'crash' });
-        expect((crashedErr as any).prevState).toBe(0);
+        expect(seen).toBeDefined();
+        expect(seen!.error).toBeInstanceOf(Error);
+        expect((seen!.error as Error).message).toBe('Crash!');
+        expect(seen!.message).toEqual({ type: 'crash' });
+        expect(seen!.previousState).toBe(0);
     });
 
     // ── stop()/restart() must settle pending call() promises ─────────────────
@@ -97,16 +92,11 @@ describe('Server', () => {
         }   
     );
 
-    it('rejects a call() queued behind a crashing message when a supervisor restarts the server (restartOne)',
+    it('rejects a call() queued behind a crashing message when policy "reset" restarts the server',
         async () => {
-            let crashInfo: unknown;
-            const crashHandler: CrashHandler = {
-                handleCrash: async (id, err, msg, prevState) => {
-                    crashInfo = { id, err, msg, prevState };
-                }
-            };
-
-            const supervisor = new Supervisor(crashHandler, {strategy: 'restartOne'});
+            // 'reset' is the destructive policy — it discards pending work. Under
+            // 'resume'/'replay' the queued call would survive instead.
+            const supervisor = new Supervisor({ onError: () => {} }, { scope: 'one', policy: 'reset' });
 
             type Msg = 
             | { type: 'crash'; reply: number }

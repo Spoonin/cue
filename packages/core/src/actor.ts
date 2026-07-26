@@ -1,6 +1,6 @@
 import { Mailbox } from "./mailbox.js";
 import { DEFAULT_SCHEDULER, Scheduler } from "./scheduler.js";
-import { ActorFn, ActorOptions, ActorRef, CrashHandler, Drainable, Supervisable } from "./types.js";
+import { ActorFn, ActorOptions, ActorRef, CrashHandler, Drainable, RestartOptions, Supervisable } from "./types.js";
 
 export type { ActorFn, ActorOptions, ActorRef, Drainable };
 
@@ -40,11 +40,21 @@ export class Actor<State, Msg> implements Drainable, Supervisable {
     
          
     
-    restart(): void {           
+    // `reset` wipes state and pending work. `resume`/`replay` keep the mailbox so
+    // messages queued behind the failure survive in their original order — the
+    // failed message itself is pushed back to the head by drain(), not here.
+    restart(opts?: RestartOptions): void {
+        const policy = opts?.policy ?? 'reset';
         this.#stopped = false;
-        this.#state = this.#initState;
-        this.#mailbox.clear();
-        this.#scheduler.enqueue(this);  
+
+        if (policy === 'reset') {
+            this.#state = this.#initState;
+            this.#mailbox.clear();
+        } else if (opts && 'state' in opts) {
+            this.#state = opts.state as State;
+        }
+
+        this.#scheduler.enqueue(this);
     }
 
     send(msg: Msg): boolean {
@@ -95,8 +105,18 @@ export class Actor<State, Msg> implements Drainable, Supervisable {
             this.#afterMessage?.(this.#state);
         } catch (err) {
             if (this.crashHandler) {
-                // supervisor decides — do NOT stop the actor here
-                await this.crashHandler.handleCrash(this.id, err, msg, stateBefore);
+                // supervisor decides — do NOT stop the actor here.
+                // It restarts us first, then tells us what to do with this message.
+                const directive = await this.crashHandler.handleCrash({
+                    childId: this.id,
+                    error: err,
+                    message: msg,
+                    previousState: stateBefore,
+                });
+                if (directive === 'replay') {
+                    this.#mailbox.pushFront(msg);
+                    return !this.#mailbox.isEmpty;
+                }
             } else {
                 // orphan actor — stop and log
                 this.stop();

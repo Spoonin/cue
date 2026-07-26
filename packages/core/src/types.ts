@@ -1,16 +1,50 @@
 // Shared contracts — no implementations.
 // Both actor.ts and scheduler.ts import from here to avoid circular deps.
 
-// How a supervisor responds when one child crashes — who else is affected.
-export type SupervisionStrategy = 'restartOne' | 'restartAll' | 'restartRest' | 'escalate';
+// Supervision has two independent axes. Scope answers *who* a crash affects;
+// Policy answers *what happens* to them. Keeping them apart avoids the
+// contradiction the old single enum produced (`restartAll` + stop).
+export type Scope = 'one' | 'all' | 'rest';
+
+export type Policy =
+    | 'reset'     // back to initialState; failed message dropped
+    | 'resume'    // keep pre-crash state; failed message dropped
+    | 'replay'    // keep pre-crash state; failed message redelivered at the mailbox head
+    | 'stop'      // retire the child; do not restart
+    | 'escalate'; // hand to the parent — scope is ignored
+
+// What happens to the one in-flight message that crashed. Deliberately distinct
+// from Policy: Policy is about children, Directive is about a single message.
+export type Directive = 'replay' | 'drop';
+
+export interface Crash {
+    childId: string;
+    error: unknown;
+    message: unknown;
+    previousState: unknown;
+}
+
+export interface RestartOptions {
+    policy?: Policy;
+    // Pre-crash state to adopt. Ignored by children that hold no state (Supervisor, Task).
+    state?: unknown;
+}
 
 export interface Supervisable {
     stop(): void;
-    restart(): void;
+    restart(opts?: RestartOptions): void;
 }
 
+// Internal contract — implemented only by Supervisor. The return value tells the
+// crashing child what to do with the message it is still holding.
 export interface CrashHandler {
-    handleCrash(id: string, err: unknown, msg: unknown, prevState: unknown): Promise<void>;
+    handleCrash(crash: Crash): Promise<Directive>;
+}
+
+// What a caller passes to the root Supervisor: a terminal reporter, not a decider.
+// It has no children to restart and no message to replay, so it returns nothing.
+export interface ErrorReporter {
+    onError(crash: Crash): void | Promise<void>;
 }
 
 export type ActorFn<State, Msg> = (state: State, msg: Msg) => State | Promise<State>;
