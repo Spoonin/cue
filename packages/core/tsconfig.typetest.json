@@ -1,0 +1,14 @@
+{
+  // Type-level checks only: the type tests in __tests__/types and the repo's
+  // examples/. jest (@swc/jest) and tsx strip types, so nothing else checks them.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "declaration": false,
+    "declarationMap": false,
+    "rootDir": "../..",
+    // examples/ import sources as "../packages/core/src/x.ts"
+    "allowImportingTsExtensions": true
+  },
+  "include": ["src", "__tests__/types", "../../examples"]
+}

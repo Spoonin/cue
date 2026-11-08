@@ -42,24 +42,25 @@ const contactAsync = async () => {
     server.cast({ type: 'addContact', contact: { email: 'john.doe@example.com', name: 'John Doe', phone: '123-456-7890' } });
     const contactInfo = await server.call({ type: 'getContactInfo', email: 'john.doe@example.com' });
 
-    console.log('Contact info for John Doe:', contactInfo);
+    // Each reply is typed from its message `type`: Contact | null here, Contact[] below.
+    console.log('Contact info for John Doe:', contactInfo?.name, contactInfo?.phone);
 
     server.cast({ type: 'addContact', contact: { email: 'jane.doe@example.com', name: 'Jane Doe', phone: '987-654-3210' } });
 
     const allContacts = await server.call({ type: 'listContacts' });
 
-    console.log('All contacts:', allContacts);
+    console.log(`All contacts (${allContacts.length}):`, allContacts.map(c => c.email));
 
     const updatedContact = await server.call({ type: 'updateContact', email: 'john.doe@example.com', updatedInfo: { phone: '111-222-3333' } });
 
-    console.log('Updated contact info for John Doe:', updatedContact);
+    console.log('Updated phone for John Doe:', updatedContact?.phone);
 
     const removed = await server.call({ type: 'removeContact', email: 'jane.doe@example.com' });
 
-    console.log('Removed Jane Doe:', removed);
+    console.log('Removed Jane Doe:', removed ? 'yes' : 'no');
     const finalContacts = await server.call({ type: 'listContacts' });
 
-    console.log('Final contacts:', finalContacts);
+    console.log(`Final contacts (${finalContacts.length}):`, finalContacts.map(c => c.email));
 };
 
 contactAsync();

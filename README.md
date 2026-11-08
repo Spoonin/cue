@@ -112,7 +112,7 @@ server.cast({ type: "add", amount: 5 });
 const total = await server.call({ type: "total" }); // 5
 ```
 
-Handlers for `cast` messages return the new `State` directly; handlers for `call` messages (any message with a `reply` field) return `{ state, reply }`. See `examples/address-book.ts` for a full CRUD-style server.
+Handlers for `cast` messages return the new `State` directly; handlers for `call` messages (any message with a `reply` field) return `{ state, reply }`. The type of what `call` resolves to follows the message `type`: above, `total` is a `number`, not a union of every reply. To pass the type argument explicitly, give the `type` literal, `server.call<"total">(…)`. See `examples/address-book.ts` for a full CRUD-style server.
 
 ## Non-obvious behaviors
 

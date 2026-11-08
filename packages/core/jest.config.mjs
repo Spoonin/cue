@@ -2,6 +2,8 @@
 export default {
   testEnvironment: 'node',
   extensionsToTreatAsEsm: ['.ts'],
+  // Type-level tests: checked by `pnpm typecheck`, nothing to run.
+  testPathIgnorePatterns: ['/node_modules/', '/__tests__/types/'],
   moduleNameMapper: {
     '^(\\.{1,2}/.*)\\.js$': '$1',
   },

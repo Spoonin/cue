@@ -1,7 +1,7 @@
 
 import { Mailbox } from "./mailbox.js";
 import { Scheduler, DEFAULT_SCHEDULER } from "./scheduler.js";
-import { CallMsg, CrashHandler, DistributiveOmit, Drainable, DeadLetterReason, Handlers, RestartOptions, ServerRef, Supervisable } from "./types.js";
+import { CallArg, CallMsg, CallOf, CrashHandler, Drainable, DeadLetterReason, Handlers, RestartOptions, ServerRef, Supervisable } from "./types.js";
 
 let _nextId = 0;
 function nextId(): string {
@@ -74,11 +74,11 @@ export class Server<State, Msg extends { type: string }> implements Drainable, S
         return this.#mailbox.push(envelope);
     }
 
-    call<M extends CallMsg<Msg>>(msg: DistributiveOmit<M, 'reply'>): Promise<M['reply']> {
+    call<T extends CallMsg<Msg>['type']>(msg: CallArg<Msg, T>): Promise<CallOf<Msg, T>['reply']> {
         if(this.#stopped) {
             return Promise.reject(new Error(`Server ${this.id} is stopped`));
         }
-        const promise = new Promise<M['reply']>((resolve, reject) => {
+        const promise = new Promise<CallOf<Msg, T>['reply']>((resolve, reject) => {
             const envelope: Envelope<Msg> = {
                 msg: msg as unknown as Msg,
                 resolve,

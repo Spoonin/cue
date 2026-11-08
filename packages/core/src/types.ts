@@ -125,10 +125,21 @@ export type Handlers<State, Msg extends { type: string }> = {
 export type CastMsg<M> = Exclude<M, { reply: unknown }>;
 export type CallMsg<M> = Extract<M, { reply: unknown }>;
 
-export type ServerRef<Msg> = {
+// The call message(s) whose `type` is T.
+export type CallOf<Msg, T> = Extract<CallMsg<Msg>, { type: T }>;
+
+// The argument call() takes for type T: the message without its `reply`.
+// `{ type: T }` sits directly in the parameter so T is inferred from the literal;
+// hidden inside Extract/Omit it would not be, and the reply would widen to the
+// union of every call reply.
+export type CallArg<Msg, T> = { type: T } & DistributiveOmit<CallOf<Msg, T>, 'reply' | 'type'>;
+
+export type ServerRef<Msg extends { type: string }> = {
     readonly id: string;
     cast(msg: CastMsg<Msg>): boolean;
-    call<M extends CallMsg<Msg>>(msg: DistributiveOmit<M, 'reply'>): Promise<M['reply']>;
+    // The reply type follows the message `type`. An explicit type argument is the
+    // `type` literal — call<'total'>(…) — not the message type.
+    call<T extends CallMsg<Msg>['type']>(msg: CallArg<Msg, T>): Promise<CallOf<Msg, T>['reply']>;
 }
 
 export type AgentRef<State> = {
