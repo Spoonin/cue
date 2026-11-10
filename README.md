@@ -146,7 +146,7 @@ const thinker: ServerRef<Msg> = system.spawnServer<State, Msg>({
 ```
 
 - **Both outcomes are messages.** `onOk` and `onError` are required and must return cast messages of the target, and the types enforce it (a call message is an error: nobody would get its reply). If `onOk` throws, the error goes to `onError`. The work is a thunk, so a synchronous throw counts as a failure too (a promise is also accepted).
-- **It never rejects.** It resolves `true` once the message is in the mailbox, and `false` if nothing was delivered: the target was stopped meanwhile, or `onError` threw.
+- **It never rejects.** It resolves `true` once the message is in the mailbox, and `false` if nothing was delivered: the target was stopped meanwhile, or `onError` threw. That `false` is the only trace: an undelivered result is **not** dead-lettered, so `onDeadLetter` never sees it (a ref doesn't know its supervisor). If you account for lost messages there, check the returned boolean yourself.
 - **For an existing promise chain**, the same handlers are available for `.then`: `promise.then(to.ok(onOk)).catch(to.error(onError))`, where `const to = pipeTo(target)`. Put `error` in `.catch` so a throwing `onOk` reaches it.
 - **Targets**: a `ServerRef` (delivered with `cast`) or an `ActorRef` (delivered with `send`).
 - **No ordering.** Results arrive whenever their work settles, interleaved with other messages, so a newer request can finish first. Put an id in the message and drop stale results in the receiver.
