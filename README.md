@@ -169,6 +169,8 @@ Known gap: handlers don't receive a ref to their own actor. Close over the ref a
 
 **`stop()` is hard, and destructive restarts are loud.** Stopping a child discards whatever is still queued — it does *not* finish the backlog first — and every discarded message goes to `onDeadLetter`. Waiting `call`/`get` callers are additionally rejected with `Error("... is stopped")`. A `reset` restart is destructive in the same way; `resume` and `replay` keep the queue, so work sitting behind a failure survives.
 
+**A stop is final.** To stop one child, ask its supervisor: `supervisor.stopChild(ref)` takes any ref it spawned (actor, server, agent) or a child supervisor, and returns `false` for anything it doesn't directly own. `ServerRef` and `AgentRef` have no `stop()` of their own, because stopping is the owner's call; `ActorRef.stop()` exists and goes through the supervisor in the same way. A stopped child is forgotten by its supervisor. A pending backoff timer doesn't restart it, and neither does a later `scope: 'all'`/`'rest'` restart caused by a sibling. The same holds for children retired by `policy: 'stop'` or by exhausting `maxRestarts`, and for a supervisor's own `stop()`, after which its parent's restarts leave the whole subtree down.
+
 **`Registry` holds `WeakRef`s.** A registered actor can be garbage-collected once nothing else references its `ActorRef`, silently removing it from the registry (`src/registry.ts:16-19`). Keep a strong reference to any actor you expect `Registry.lookup` to keep finding.
 
 ## Development

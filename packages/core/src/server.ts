@@ -221,6 +221,7 @@ export class Server<State, Msg extends { type: string }> implements Drainable, S
     stop(): void {
         this.#stopped = true;
         this.#discardPending('retired');
+        this.#crashHandler?.noteStopped?.(this.id);
     }
 
     // Keep queueing, stop draining. Cleared by restart().

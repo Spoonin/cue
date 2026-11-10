@@ -561,3 +561,145 @@ describe('Supervisor dead letters', () => {
         expect(letters[0].childId).toBe(actor.id);
     });
 });
+
+describe('Supervisor stopping one child', () => {
+    const tick = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+
+    it('stopChild stops that child and leaves its siblings running', async () => {
+        const scheduler = new Scheduler();
+        const supervisor = new Supervisor(silent, { backoff: 'none', scheduler });
+        const target = supervisor.spawn<Counter, string>(testFn, { initialState: { count: 0 } });
+        const sibling = supervisor.spawn<Counter, string>(testFn, { initialState: { count: 0 } });
+
+        expect(supervisor.stopChild(target)).toBe(true);
+
+        expect(() => target.send('nop')).toThrow(/stopped/);
+        expect(() => sibling.send('nop')).not.toThrow();
+    });
+
+    it('stopChild on a Server rejects its waiting callers and dead-letters what was queued', async () => {
+        const letters: DeadLetter[] = [];
+        const scheduler = new Scheduler();
+        const supervisor = new Supervisor(silent, { backoff: 'none', onDeadLetter: (l) => { letters.push(l); }, scheduler });
+        type Msg = { type: 'get'; reply: number };
+        const server = supervisor.spawnServer<number, Msg>({ initialState: 0, handlers: { get: (s) => ({ state: s, reply: s }) } });
+
+        const pending = server.call({ type: 'get' }); // queued, not yet drained
+        supervisor.stopChild(server);
+
+        await expect(pending).rejects.toThrow(/stopped/);
+        expect(letters.map(l => [l.childId, l.reason])).toEqual([[server.id, 'retired']]);
+        await expect(server.call({ type: 'get' })).rejects.toThrow(/stopped/);
+    });
+
+    it('stopChild on an Agent rejects its waiting callers', async () => {
+        const scheduler = new Scheduler();
+        const supervisor = new Supervisor(silent, { backoff: 'none', scheduler });
+        const agent = supervisor.spawnAgent(1);
+
+        const pending = agent.get((n) => n);
+        supervisor.stopChild(agent);
+
+        await expect(pending).rejects.toThrow(/stopped/);
+    });
+
+    it('stopChild on a child supervisor stops its whole subtree', async () => {
+        const scheduler = new Scheduler();
+        const parent = new Supervisor(silent, { backoff: 'none', scheduler });
+        const child = parent.spawnSupervisor();
+        const grandchild = child.spawn<Counter, string>(testFn, { initialState: { count: 0 } });
+
+        expect(parent.stopChild(child)).toBe(true);
+
+        expect(() => grandchild.send('nop')).toThrow(/stopped/);
+    });
+
+    it('stopChild refuses a child it does not own, and leaves it running', async () => {
+        const scheduler = new Scheduler();
+        const parent = new Supervisor(silent, { backoff: 'none', scheduler });
+        const child = parent.spawnSupervisor();
+        const grandchild = child.spawn<Counter, string>(testFn, { initialState: { count: 0 } });
+
+        expect(parent.stopChild(grandchild)).toBe(false);
+        expect(() => grandchild.send('nop')).not.toThrow();
+    });
+
+    it('stopChild twice is a no-op the second time', async () => {
+        const supervisor = new Supervisor(silent, { backoff: 'none', scheduler: new Scheduler() });
+        const actor = supervisor.spawn<Counter, string>(testFn, { initialState: { count: 0 } });
+
+        expect(supervisor.stopChild(actor)).toBe(true);
+        expect(supervisor.stopChild(actor)).toBe(false);
+    });
+
+    // A stop is final. Each case below used to come back to life.
+
+    it('a child stopped while backing off is not revived by its restart timer (stopChild)', async () => {
+        const scheduler = new Scheduler();
+        const supervisor = new Supervisor(silent, { backoff: { initialMs: 20, maxMs: 20, factor: 1 }, scheduler });
+        const actor = supervisor.spawn<Counter, string>(testFn, { initialState: { count: 0 } });
+
+        actor.send('trigger');
+        await scheduler.whenIdle(); // crashed: suspended, restart timer pending
+        supervisor.stopChild(actor);
+        await tick(50);
+
+        expect(() => actor.send('nop')).toThrow(/stopped/);
+    });
+
+    it('a child stopped while backing off is not revived by its restart timer (ActorRef.stop)', async () => {
+        const scheduler = new Scheduler();
+        const supervisor = new Supervisor(silent, { backoff: { initialMs: 20, maxMs: 20, factor: 1 }, scheduler });
+        const actor = supervisor.spawn<Counter, string>(testFn, { initialState: { count: 0 } });
+
+        actor.send('trigger');
+        await scheduler.whenIdle();
+        actor.stop(); // goes through the supervisor too
+        await tick(50);
+
+        expect(() => actor.send('nop')).toThrow(/stopped/);
+    });
+
+    it('a stopped child is not revived when a sibling crash restarts the whole scope', async () => {
+        const scheduler = new Scheduler();
+        const supervisor = new Supervisor(silent, { backoff: 'none', scope: 'all', scheduler });
+        const stopped = supervisor.spawn<Counter, string>(testFn, { initialState: { count: 0 } });
+        const sibling = supervisor.spawn<Counter, string>(testFn, { initialState: { count: 0 } });
+
+        supervisor.stopChild(stopped);
+        sibling.send('trigger');
+        await scheduler.whenIdle();
+
+        expect(() => stopped.send('nop')).toThrow(/stopped/);
+        expect(() => sibling.send('nop')).not.toThrow(); // the sibling was restarted, as before
+    });
+
+    it('a child retired by policy "stop" is not revived when the parent restarts its subtree', async () => {
+        const scheduler = new Scheduler();
+        const parent = new Supervisor(silent, { backoff: 'none', scope: 'all', scheduler });
+        const inner = parent.spawnSupervisor({ policy: 'stop' });
+        const retired = inner.spawn<Counter, string>(testFn, { initialState: { count: 0 } });
+        const sibling = parent.spawn<Counter, string>(testFn, { initialState: { count: 0 } });
+
+        retired.send('trigger');
+        await scheduler.whenIdle();
+        sibling.send('trigger'); // parent restarts all its children, `inner` included
+        await scheduler.whenIdle();
+
+        expect(() => retired.send('nop')).toThrow(/stopped/);
+    });
+
+    it('a child supervisor stopped directly is not revived by its parent', async () => {
+        const scheduler = new Scheduler();
+        const parent = new Supervisor(silent, { backoff: 'none', scope: 'all', scheduler });
+        const inner = parent.spawnSupervisor();
+        const grandchild = inner.spawn<Counter, string>(testFn, { initialState: { count: 0 } });
+        const sibling = parent.spawn<Counter, string>(testFn, { initialState: { count: 0 } });
+
+        inner.stop();
+        sibling.send('trigger');
+        await scheduler.whenIdle();
+
+        expect(() => grandchild.send('nop')).toThrow(/stopped/);
+    });
+});

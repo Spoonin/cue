@@ -88,6 +88,7 @@ export class Actor<State, Msg> implements Drainable, Supervisable {
     stop(): void {
         this.#stopped = true;
         this.#discardPending('retired');
+        this.crashHandler?.noteStopped?.(this.id);
     }
 
     #discardPending(reason: DeadLetterReason): void {

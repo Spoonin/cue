@@ -193,6 +193,7 @@ export class Agent<State> implements Drainable, Supervisable {
     stop(): void {
         this.#stopped = true;
         this.#discardPending('retired');
+        this.#crashHandler?.noteStopped?.(this.id);
     }
 
     // Keep queueing, stop draining. Cleared by restart().

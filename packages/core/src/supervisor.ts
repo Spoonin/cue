@@ -94,6 +94,11 @@ export class Supervisor implements CrashHandler, Supervisable {
         this.#onDeadLetter?.(letter);
     }
 
+    // A child stopped, by whatever hand. See CrashHandler.noteStopped.
+    noteStopped(childId: string): void {
+        this.#forget(childId);
+    }
+
     // Spawn a child actor under this supervisor.
     spawn<State, Msg>(
         fn: ActorFn<State, Msg>,
@@ -135,12 +140,38 @@ export class Supervisor implements CrashHandler, Supervisable {
         return agent.ref;
     }
 
-    // Stop all children immediately.
+    // Stop one child of this supervisor: an ActorRef, ServerRef, AgentRef or child
+    // Supervisor it spawned. Final, like every stop: what the child had queued is
+    // dead-lettered as 'retired', waiting callers are rejected, and the child is
+    // never restarted again. Returns false, doing nothing, for anything this
+    // supervisor does not directly own (a grandchild, or a child already stopped).
+    stopChild(child: { readonly id: string }): boolean {
+        const found = this.#children.get(child.id);
+        if (!found) return false;
+        this.#retire(child.id, found);
+        return true;
+    }
+
+    // Stop all children immediately. Final for this supervisor too: its parent
+    // forgets it, so a later restart by the parent does not revive the subtree.
     stop(): void {
         for (const [id, child] of this.#children) {
-            this.#cancelPendingRestart(id);
-            child.stop();
+            this.#retire(id, child); // deleting the current entry mid-iteration is safe for a Map
         }
+        this.#parent.noteStopped?.(this.id);
+    }
+
+    // Forget first, then stop: the child's own stop() reports back through
+    // noteStopped, which by then finds nothing left to do.
+    #retire(childId: string, child: Supervisable): void {
+        this.#forget(childId);
+        child.stop();
+    }
+
+    #forget(childId: string): void {
+        this.#cancelPendingRestart(childId);
+        this.#children.delete(childId);
+        this.#budgets.delete(childId);
     }
 
     suspend(): void {
@@ -253,10 +284,7 @@ export class Supervisor implements CrashHandler, Supervisable {
                 return this.#parent.handleCrash({ ...crash, childId: this.id });
 
             case 'stop':
-                this.#eachInScope(crash.childId, (child, id) => {
-                    this.#cancelPendingRestart(id);
-                    child.stop();
-                });
+                this.#eachInScope(crash.childId, (child, id) => this.#retire(id, child));
                 this.#deadLetter(crash, 'retired');
                 return 'drop';
 
@@ -268,11 +296,7 @@ export class Supervisor implements CrashHandler, Supervisable {
                 // Restart budget first: a child about to be retired should not replay.
                 budget.restarts++;
                 if (budget.restarts > this.#maxRestarts) {
-                    this.#budgets.delete(crash.childId);
-                    this.#eachInScope(crash.childId, (child, id) => {
-                        this.#cancelPendingRestart(id); // no reviving a retired child
-                        child.stop();
-                    });
+                    this.#eachInScope(crash.childId, (child, id) => this.#retire(id, child));
                     this.#deadLetter(crash, 'retired');
                     return 'drop';
                 }

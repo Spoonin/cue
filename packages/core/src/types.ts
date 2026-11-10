@@ -79,6 +79,12 @@ export interface CrashHandler {
     // For messages a child abandons on its own, without a crash — a call() whose
     // caller timed out. Routed here so it reaches the same onDeadLetter hook.
     noteDeadLetter?(letter: DeadLetter): void;
+
+    // Called by a child whenever it stops, including a stop its supervisor did not
+    // initiate: ActorRef.stop(), or a nested Supervisor's own stop(). Stopping is
+    // final, so the supervisor forgets the child; otherwise a pending restart
+    // timer or a later scoped restart would bring it back.
+    noteStopped?(childId: string): void;
 }
 
 // What a caller passes to the root Supervisor: a terminal reporter, not a decider.
