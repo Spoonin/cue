@@ -50,7 +50,7 @@ Supervision has two independent axes. **Scope** says *who* a crash affects; **po
 import { Supervisor } from "@cue/core";
 
 const system = new Supervisor(
-  { onError: ({ childId, error }) => console.error(`[${childId}]`, error) },
+  { onError: ({ origin, error }) => console.error(`[${origin}]`, error) },
   {
     scope: "one",      // 'one' | 'all' | 'rest'
     policy: "reset",   // 'reset' | 'resume' | 'replay' | 'stop' | 'escalate'
@@ -72,6 +72,8 @@ const worker = system.spawn<State, Msg>(handler, { initialState: { count: 0 } })
 Every `Supervisor` needs an `ErrorReporter` in its constructor — there's no default, because someone has to own errors that reach the top (`src/supervisor.ts:74-76`).
 
 **Crashes are only reported to `onError` under `escalate`.** Any restart policy handles the crash locally and tells nobody. Use `onDeadLetter` if you want to see failures a supervisor absorbed — it fires for every message that will never be delivered, with a `reason` of `dropped`, `poison`, `retired`, or `timeout`.
+
+A `Crash` names two children. `origin` is the actor, server or agent that actually threw. `childId` is the reporting supervisor's direct child, which escalation rewrites at each level, so at the root it is the top supervisor below it. Log `origin`. Dead letters always name the child whose mailbox held the message, even for an escalated crash.
 
 ### Keeping restarts bounded
 

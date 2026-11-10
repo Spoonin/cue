@@ -153,6 +153,7 @@ export class Agent<State> implements Drainable, Supervisable {
             if (this.#crashHandler) {
                 const directive = await this.#crashHandler.handleCrash({
                     childId: this.id,
+                    origin: this.id,
                     error,
                     message: envelope.fn,
                     previousState: this.#state,

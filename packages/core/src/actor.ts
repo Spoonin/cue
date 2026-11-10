@@ -143,6 +143,7 @@ export class Actor<State, Msg> implements Drainable, Supervisable {
                 // It restarts us first, then tells us what to do with this message.
                 const directive = await this.crashHandler.handleCrash({
                     childId: this.id,
+                    origin: this.id,
                     error: err,
                     message: msg,
                     previousState: stateBefore,

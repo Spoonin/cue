@@ -149,6 +149,7 @@ export class Server<State, Msg extends { type: string }> implements Drainable, S
                     // caller's promise stays open across the restart.
                     const directive = await this.#crashHandler.handleCrash({
                         childId: this.id,
+                        origin: this.id,
                         error: err,
                         message: envelope.msg,
                         previousState: this.#state,
@@ -177,6 +178,7 @@ export class Server<State, Msg extends { type: string }> implements Drainable, S
                 if (this.#crashHandler) {
                     const directive = await this.#crashHandler.handleCrash({
                         childId: this.id,
+                        origin: this.id,
                         error: err,
                         message: envelope.msg,
                         previousState: this.#state,

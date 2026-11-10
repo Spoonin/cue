@@ -172,6 +172,33 @@ describe('Supervisor policy', () => {
 
         expect(seen[0].childId).toBe(parent.id);
     });
+
+    it('escalation keeps the id of the actor that actually crashed as origin, through every level', async () => {
+        const { seen, reporter } = recorder();
+        const scheduler = new Scheduler();
+        const parent = new Supervisor(reporter, { policy: 'escalate', scheduler });
+        const child = parent.spawnSupervisor({ policy: 'escalate' });
+        const actor = child.spawn<Counter, string>(testFn, { initialState: { count: 0 } });
+
+        actor.send('trigger');
+        await scheduler.whenIdle();
+
+        expect(seen[0].origin).toBe(actor.id);
+        expect((seen[0].error as Error).message).toBe('Crash!');
+    });
+
+    it('origin is the child itself when nothing escalated', async () => {
+        const { seen, reporter } = recorder();
+        const scheduler = new Scheduler();
+        const supervisor = new Supervisor(reporter, { policy: 'escalate', scheduler });
+        const actor = supervisor.spawn<Counter, string>(testFn, { initialState: { count: 0 } });
+
+        actor.send('trigger');
+        await scheduler.whenIdle();
+
+        expect(seen[0].childId).toBe(supervisor.id);
+        expect(seen[0].origin).toBe(actor.id);
+    });
 });
 
 describe('Supervisor replay', () => {
@@ -545,6 +572,19 @@ describe('Supervisor dead letters', () => {
         await scheduler.whenIdle();
 
         expect(letters.map(l => l.reason)).toEqual(['dropped', 'retired']);
+    });
+
+    it('names the actor whose message it was, even when the crash was escalated', async () => {
+        const { letters, onDeadLetter } = collectLetters();
+        const scheduler = new Scheduler();
+        const parent = new Supervisor(silent, { backoff: 'none', policy: 'reset', onDeadLetter, scheduler });
+        const child = parent.spawnSupervisor({ policy: 'escalate' });
+        const actor = child.spawn<Counter, string>(testFn, { initialState: { count: 0 } });
+
+        actor.send('trigger');
+        await scheduler.whenIdle();
+
+        expect(letters.map(l => [l.childId, l.reason])).toEqual([[actor.id, 'dropped']]);
     });
 
     it('is inherited by child supervisors so a nested tree reports to one place', async () => {

@@ -31,7 +31,7 @@ const reasonOf = (e: unknown) => (e instanceof Error ? `${e.name}: ${e.message}`
 // Kept only so this demo can show what each delivery resolved to.
 const deliveries = new Map<number, Promise<boolean>>();
 
-const system = new Supervisor({ onError: ({ childId, error }) => console.error(`[${childId}] crashed:`, error) });
+const system = new Supervisor({ onError: ({ origin, error }) => console.error(`[${origin}] crashed:`, error) });
 
 // Handlers get no ref to themselves; closing over `thinker` works because they
 // only run after spawnServer has returned.

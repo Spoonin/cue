@@ -18,7 +18,12 @@ export type Policy =
 export type Directive = 'replay' | 'drop';
 
 export interface Crash {
+    // The direct child of whoever receives this crash. Escalation rewrites it to
+    // the escalating supervisor, because that is the child its parent knows.
     childId: string;
+    // The actor, server or agent that actually threw. Never rewritten, so a
+    // reporter at the root still knows which one failed.
+    origin: string;
     error: unknown;
     message: unknown;
     previousState: unknown;

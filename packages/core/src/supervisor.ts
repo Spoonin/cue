@@ -231,9 +231,11 @@ export class Supervisor implements CrashHandler, Supervisable {
         }
     }
 
+    // Named after the origin, not childId: the message was in the origin's mailbox,
+    // even when the crash reached us through an escalating supervisor.
     #deadLetter(crash: Crash, reason: DeadLetterReason): void {
         this.#onDeadLetter?.({
-            childId: crash.childId,
+            childId: crash.origin,
             message: crash.message,
             error: crash.error,
             reason,
@@ -281,6 +283,7 @@ export class Supervisor implements CrashHandler, Supervisable {
 
         switch (this.#policy) {
             case 'escalate':
+                // childId becomes us, the child our parent knows; origin is kept.
                 return this.#parent.handleCrash({ ...crash, childId: this.id });
 
             case 'stop':
