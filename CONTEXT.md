@@ -27,6 +27,11 @@ _Avoid_: job, future
 The handle that escapes an actor — the only way to reach one from outside.
 _Avoid_: pid, handle, address
 
+**Pipe**:
+Delivering the outcome of async work to an actor as an ordinary message, so a handler can
+start work without waiting for it. Both success and failure arrive as messages.
+_Avoid_: await in handler, callback
+
 **Mailbox**:
 The buffer holding messages a child has accepted but not yet processed.
 _Avoid_: queue, inbox

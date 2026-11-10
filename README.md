@@ -114,6 +114,47 @@ const total = await server.call({ type: "total" }); // 5
 
 Handlers for `cast` messages return the new `State` directly; handlers for `call` messages (any message with a `reply` field) return `{ state, reply }`. The type of what `call` resolves to follows the message `type`: above, `total` is a `number`, not a union of every reply. To pass the type argument explicitly, give the `type` literal, `server.call<"total">(…)`. See `examples/address-book.ts` for a full CRUD-style server.
 
+### Async work in a handler
+
+Handlers are synchronous: a handler returns the new state (or `{ state, reply }`), never a promise. An actor processes one message at a time, and a handler that awaited would either block its mailbox or let a second message run against the same state. So async work is *started* in a handler, and its outcome comes back later as an ordinary message. `pipeTo` does that delivery:
+
+```typescript
+import { pipeTo, type ServerRef } from "@cue/core";
+
+type State = { latest: number; answer?: string; error?: string };
+type Msg =
+  | { type: "ask"; id: number; question: string }
+  | { type: "answered"; id: number; answer: string }
+  | { type: "failed"; id: number; reason: string };
+
+const thinker: ServerRef<Msg> = system.spawnServer<State, Msg>({
+  initialState: { latest: 0 },
+  handlers: {
+    ask: (state, msg) => {
+      pipeTo(thinker)(
+        () => askModel(msg.question, { signal: AbortSignal.timeout(5_000) }),
+        (answer) => ({ type: "answered", id: msg.id, answer }),
+        (error) => ({ type: "failed", id: msg.id, reason: String(error) }),
+      );
+      return { latest: msg.id };
+    },
+    // Keep only the latest request's outcome; older ones are stale.
+    answered: (state, msg) => (msg.id === state.latest ? { ...state, answer: msg.answer } : state),
+    failed: (state, msg) => (msg.id === state.latest ? { ...state, error: msg.reason } : state),
+  },
+});
+```
+
+- **Both outcomes are messages.** `onOk` and `onError` are required and must return cast messages of the target, and the types enforce it (a call message is an error: nobody would get its reply). If `onOk` throws, the error goes to `onError`. The work is a thunk, so a synchronous throw counts as a failure too (a promise is also accepted).
+- **It never rejects.** It resolves `true` once the message is in the mailbox, and `false` if nothing was delivered: the target was stopped meanwhile, or `onError` threw.
+- **For an existing promise chain**, the same handlers are available for `.then`: `promise.then(to.ok(onOk)).catch(to.error(onError))`, where `const to = pipeTo(target)`. Put `error` in `.catch` so a throwing `onOk` reaches it.
+- **Targets**: a `ServerRef` (delivered with `cast`) or an `ActorRef` (delivered with `send`).
+- **No ordering.** Results arrive whenever their work settles, interleaved with other messages, so a newer request can finish first. Put an id in the message and drop stale results in the receiver.
+- **No cancellation.** For a deadline, pass an `AbortSignal` into the work (e.g. `AbortSignal.timeout(ms)` into `fetch`).
+- **It's curried on the target** because that fixes the message type before the callbacks are checked. In a single call, TypeScript would widen `{ type: "answered" }` to `{ type: string }` and reject it.
+
+Known gap: handlers don't receive a ref to their own actor. Close over the ref as above. That works because handlers only run after `spawnServer` has returned, but it needs the explicit `ServerRef<Msg>` annotation. See `examples/pipe.ts` for stale results, failures, deadlines and a target stopped mid-flight.
+
 ## Non-obvious behaviors
 
 **`send()` never drops a message, even past the high watermark.** `highWatermark` is a backpressure *signal*, not a limit — `send()` still enqueues and returns `false` so the caller knows to slow down (`src/mailbox.ts:18-24`). If you need sends to actually be rejected when the mailbox is full, use `trySend()` instead, which checks capacity *before* enqueuing (`src/actor.ts:76-83`).
@@ -145,7 +186,7 @@ Run an example directly with `tsx`:
 pnpm example examples/ping-pong.ts
 ```
 
-Note that `__tests__` is outside the `tsconfig.json` `include`, and jest transpiles via swc without type checking — so **test files are not type-checked by anything**. `pnpm typecheck` covers `src` only.
+jest transpiles via swc without type checking, so **jest test files are not type-checked by anything**. `pnpm typecheck` covers `src`, plus, through `tsconfig.typetest.json`, the type-level tests in `__tests__/types/` and the `examples/`.
 
 ## Further reading
 
