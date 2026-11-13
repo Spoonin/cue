@@ -66,18 +66,14 @@ export class Server<State, Msg extends { type: string }> implements Drainable, S
     }
 
     cast(msg: Msg): boolean {
-        if (this.#stopped) {
-            throw new Error(`Server ${this.id} is stopped`);
-        }
+        if (this.#stopped) throw this.#undeliverable(msg);
         const envelope: Envelope<Msg> = { msg };
         this.#scheduler.enqueue(this);
         return this.#mailbox.push(envelope);
     }
 
     call<T extends CallMsg<Msg>['type']>(msg: CallArg<Msg, T>): Promise<CallOf<Msg, T>['reply']> {
-        if(this.#stopped) {
-            return Promise.reject(new Error(`Server ${this.id} is stopped`));
-        }
+        if (this.#stopped) return Promise.reject(this.#undeliverable(msg as unknown as Msg));
         const promise = new Promise<CallOf<Msg, T>['reply']>((resolve, reject) => {
             const envelope: Envelope<Msg> = {
                 msg: msg as unknown as Msg,
@@ -199,6 +195,14 @@ export class Server<State, Msg extends { type: string }> implements Drainable, S
             this.#failedSinceCleanDrain = false;
             this.#crashHandler?.noteCleanDrain?.(this.id);
         }
+    }
+
+    // A message that arrived after stop(). See Actor — the sender is told by the
+    // throw or rejection, the operator by the dead letter.
+    #undeliverable(message: Msg): Error {
+        const error = new Error(`Server ${this.id} is stopped`);
+        this.#crashHandler?.noteDeadLetter?.({ childId: this.id, message, error, reason: 'undeliverable' });
+        return error;
     }
 
     // Discard everything queued. Callers are rejected AND the messages are

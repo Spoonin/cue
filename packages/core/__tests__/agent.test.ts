@@ -141,6 +141,21 @@ describe('Agent', () => {
             expect(() => agent.update(state => state + 1)).toThrow(/stopped/);
         }
     );
+
+    it('dead-letters every function sent after it stopped', async () => {
+        const letters: DeadLetter[] = [];
+        const agent = new Agent(0, {
+            crashHandler: { handleCrash: async () => 'drop', noteDeadLetter: (l) => { letters.push(l); } },
+        });
+        agent.stop();
+        const inc = (s: number) => s + 1;
+
+        expect(() => agent.update(inc)).toThrow(/stopped/);
+        await expect(agent.get(s => s)).rejects.toThrow(/stopped/);
+        await expect(agent.getAndUpdate(s => ({ state: s, reply: s }))).rejects.toThrow(/stopped/);
+        expect(letters.map(l => l.reason)).toEqual(['undeliverable', 'undeliverable', 'undeliverable']);
+        expect(letters[0].message).toBe(inc);
+    });
 });
 describe('Agent reply timeouts', () => {
     // Suspending holds the envelope in the mailbox deterministically, without

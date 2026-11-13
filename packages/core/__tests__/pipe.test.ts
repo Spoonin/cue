@@ -2,6 +2,8 @@ import { afterEach, beforeEach, describe, expect, it } from '@jest/globals';
 import { Actor } from "../src/actor";
 import { pipeTo } from "../src/pipe";
 import { Server } from "../src/server";
+import { Supervisor } from "../src/supervisor";
+import { DeadLetter } from "../src/types";
 
 type Msg =
     | { type: 'done'; value: string }
@@ -155,6 +157,33 @@ describe('pipeTo', () => {
 
         expect(delivered).toBe(true);
         expect(seen).toEqual([20]);
+    });
+
+    it('a result for a target stopped mid-flight reaches onDeadLetter, so its effect can be compensated', async () => {
+        const letters: DeadLetter[] = [];
+        const system = new Supervisor({ onError: () => {} }, { onDeadLetter: (l) => letters.push(l) });
+        const server = system.spawnServer<string[], Msg>({
+            initialState: [],
+            handlers: {
+                done: (log, msg) => [...log, msg.value],
+                failed: (log) => log,
+                get: (log) => ({ state: log, reply: log }),
+            },
+        });
+        const work = deferred<string>();
+
+        const delivery = pipeTo(server)(
+            () => work.promise,
+            (value) => ({ type: 'done', value }),
+            (e) => ({ type: 'failed', reason: reasonOf(e) }),
+        );
+        system.stopChild(server);
+        work.resolve('charge-42'); // the side effect happened regardless
+
+        expect(await delivery).toBe(false);
+        expect(letters.map(l => [l.childId, l.message, l.reason])).toEqual([
+            [server.id, { type: 'done', value: 'charge-42' }, 'undeliverable'],
+        ]);
     });
 
     describe('.then form', () => {

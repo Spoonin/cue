@@ -71,7 +71,7 @@ const worker = system.spawn<State, Msg>(handler, { initialState: { count: 0 } })
 
 Every `Supervisor` needs an `ErrorReporter` in its constructor — there's no default, because someone has to own errors that reach the top (`src/supervisor.ts:74-76`).
 
-**Crashes are only reported to `onError` under `escalate`.** Any restart policy handles the crash locally and tells nobody. Use `onDeadLetter` if you want to see failures a supervisor absorbed — it fires for every message that will never be delivered, with a `reason` of `dropped`, `poison`, `retired`, or `timeout`.
+**Crashes are only reported to `onError` under `escalate`.** Any restart policy handles the crash locally and tells nobody. Use `onDeadLetter` if you want to see failures a supervisor absorbed — it fires for every message that will never be delivered, with a `reason` of `dropped`, `poison`, `retired`, `timeout`, or `undeliverable` (sent to a child that had already stopped; the sender also gets the usual throw or rejection).
 
 A `Crash` names two children. `origin` is the actor, server or agent that actually threw. `childId` is the reporting supervisor's direct child, which escalation rewrites at each level, so at the root it is the top supervisor below it. Log `origin`. Dead letters always name the child whose mailbox held the message, even for an escalated crash.
 
@@ -148,14 +148,14 @@ const thinker: ServerRef<Msg> = system.spawnServer<State, Msg>({
 ```
 
 - **Both outcomes are messages.** `onOk` and `onError` are required and must return cast messages of the target, and the types enforce it (a call message is an error: nobody would get its reply). If `onOk` throws, the error goes to `onError`. The work is a thunk, so a synchronous throw counts as a failure too (a promise is also accepted).
-- **It never rejects.** It resolves `true` once the message is in the mailbox, and `false` if nothing was delivered: the target was stopped meanwhile, or `onError` threw. That `false` is the only trace: an undelivered result is **not** dead-lettered, so `onDeadLetter` never sees it (a ref doesn't know its supervisor). If you account for lost messages there, check the returned boolean yourself.
+- **It never rejects.** It resolves `true` once the message is in the mailbox, and `false` if nothing was delivered: the target was stopped meanwhile, or `onError` threw. An undelivered result is also dead-lettered as `undeliverable`, carrying the message `onOk` or `onError` built. That's where to compensate a side effect whose work finished after its actor stopped. A throwing `onError` leaves no message to dead-letter, so `false` is its only trace.
 - **For an existing promise chain**, the same handlers are available for `.then`: `promise.then(to.ok(onOk)).catch(to.error(onError))`, where `const to = pipeTo(target)`. Put `error` in `.catch` so a throwing `onOk` reaches it.
 - **Targets**: a `ServerRef` (delivered with `cast`) or an `ActorRef` (delivered with `send`).
 - **No ordering.** Results arrive whenever their work settles, interleaved with other messages, so a newer request can finish first. Put an id in the message and drop stale results in the receiver.
 - **No cancellation.** For a deadline, pass an `AbortSignal` into the work (e.g. `AbortSignal.timeout(ms)` into `fetch`).
 - **It's curried on the target** because that fixes the message type before the callbacks are checked. In a single call, TypeScript would widen `{ type: "answered" }` to `{ type: string }` and reject it.
 
-Known gap: handlers don't receive a ref to their own actor. Close over the ref as above. That works because handlers only run after `spawnServer` has returned, but it needs the explicit `ServerRef<Msg>` annotation. See `examples/pipe.ts` for stale results, failures, deadlines and a target stopped mid-flight.
+Known gap: handlers don't receive a ref to their own actor. Close over the ref as above. That works because handlers only run after `spawnServer` has returned, but it needs the explicit `ServerRef<Msg>` annotation. See `examples/pipe.ts` for stale results, failures, deadlines and a target stopped mid-flight, and `examples/saga.ts` for compensating external effects: undoing completed steps, bounded retry when an undo itself fails, and undoing a result orphaned by a stopped orchestrator.
 
 ## Non-obvious behaviors
 

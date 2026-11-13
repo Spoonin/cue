@@ -63,9 +63,7 @@ export class Actor<State, Msg> implements Drainable, Supervisable {
     }
 
     send(msg: Msg): boolean {
-        if (this.#stopped) {
-            throw new Error(`Actor ${this.id} is stopped`);
-        }
+        if (this.#stopped) throw this.#undeliverable(msg);
         const result = this.#mailbox.push(msg);
         // While suspended there is no point waking the scheduler — drain() would
         // just decline. restart() re-enqueues us when the backoff elapses.
@@ -74,9 +72,7 @@ export class Actor<State, Msg> implements Drainable, Supervisable {
     }
 
     trySend(msg: Msg): boolean {
-        if (this.#stopped) {
-            throw new Error(`Actor ${this.id} is stopped`);
-        }
+        if (this.#stopped) throw this.#undeliverable(msg);
         const result = this.#mailbox.tryPush(msg);
         if (result && !this.#suspended) this.#scheduler.enqueue(this);
         return result;
@@ -89,6 +85,15 @@ export class Actor<State, Msg> implements Drainable, Supervisable {
         this.#stopped = true;
         this.#discardPending('retired');
         this.crashHandler?.noteStopped?.(this.id);
+    }
+
+    // A message that arrived after stop(). The sender gets the throw, but a sender
+    // is often a pipe whose work already ran — a charge made, a seat booked — so
+    // the operator must see it too, or there is nothing to compensate from.
+    #undeliverable(message: Msg): Error {
+        const error = new Error(`Actor ${this.id} is stopped`);
+        this.crashHandler?.noteDeadLetter?.({ childId: this.id, message, error, reason: 'undeliverable' });
+        return error;
     }
 
     #discardPending(reason: DeadLetterReason): void {

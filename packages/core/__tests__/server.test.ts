@@ -148,6 +148,27 @@ describe('Server', () => {
             expect(() => server.cast({ type: 'get', reply: 0 })).toThrow(/stopped/);
         }
     );
+
+    it('dead-letters cast() and call() made after it stopped', async () => {
+        type Msg = { type: 'add'; n: number } | { type: 'get'; reply: number };
+        const letters: DeadLetter[] = [];
+        const server = new Server<number, Msg>({
+            initialState: 0,
+            handlers: {
+                add: (state, msg) => state + msg.n,
+                get: (state) => ({ state, reply: state }),
+            },
+            crashHandler: { handleCrash: async () => 'drop', noteDeadLetter: (l) => { letters.push(l); } },
+        });
+        server.stop();
+
+        expect(() => server.cast({ type: 'add', n: 1 })).toThrow(/stopped/);
+        await expect(server.call({ type: 'get' })).rejects.toThrow(/stopped/);
+        expect(letters.map(l => [l.message, l.reason])).toEqual([
+            [{ type: 'add', n: 1 }, 'undeliverable'],
+            [{ type: 'get' }, 'undeliverable'],
+        ]);
+    });
 });
 
 describe('Server call timeouts', () => {

@@ -96,6 +96,22 @@ describe('Actor lifecycle', () => {
         expect(letters.map(l => l.message)).toEqual(['a', 'b']);
         expect(letters.every(l => l.reason === 'retired')).toBe(true);
     });
+
+    it('dead-letters a message sent after it stopped, as well as throwing', () => {
+        const letters: DeadLetter[] = [];
+        const crashHandler: CrashHandler = {
+            handleCrash: async () => 'drop',
+            noteDeadLetter: (letter) => { letters.push(letter); },
+        };
+        const actor = new Actor<Counter, string>(
+            countUp, { initialState: { count: 0 } }, new Scheduler(), crashHandler,
+        );
+        actor.stop();
+
+        expect(() => actor.send('late')).toThrow(/stopped/);
+        expect(() => actor.trySend('later')).toThrow(/stopped/);
+        expect(letters.map(l => [l.message, l.reason])).toEqual([['late', 'undeliverable'], ['later', 'undeliverable']]);
+    });
 });
 
 describe('Actor under supervision', () => {

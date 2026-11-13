@@ -33,7 +33,9 @@ export type DeadLetterReason =
     | 'dropped'  // the policy did not replay, so the message was discarded
     | 'poison'   // exceeded maxAttempts and was given up on
     | 'retired'  // its child was stopped, by policy or by exhausting maxRestarts
-    | 'timeout'; // the caller stopped waiting before it was processed
+    | 'timeout'  // the caller stopped waiting before it was processed
+    | 'undeliverable'; // sent after its child had already stopped — typically a
+                       // pipe result whose work ran anyway, so a compensation cue
 
 // A message that will never be delivered. Without this, a supervisor that
 // silently restarts children makes failures invisible.

@@ -84,10 +84,15 @@ export class Agent<State> implements Drainable, Supervisable {
         }
     }
 
+    // A function sent after stop(). See Actor.
+    #undeliverable(message: unknown): Error {
+        const error = new Error(`Agent ${this.id} is stopped`);
+        this.#crashHandler?.noteDeadLetter?.({ childId: this.id, message, error, reason: 'undeliverable' });
+        return error;
+    }
+
     get<R>(fn: (state: State) => R): Promise<R> {
-        if(this.#stopped) {
-            return Promise.reject(new Error(`Agent ${this.id} is stopped`));
-        }
+        if (this.#stopped) return Promise.reject(this.#undeliverable(fn));
         return new Promise((resolve, reject) => {
             const envelope: Envelope<State> = {
                 fn: (state: State) => ({ state, reply: fn(state) }),
@@ -101,17 +106,13 @@ export class Agent<State> implements Drainable, Supervisable {
     }
 
     update(fn: (state: State) => State): void {
-        if(this.#stopped) {
-            throw new Error(`Agent ${this.id} is stopped`);
-        }
+        if (this.#stopped) throw this.#undeliverable(fn);
         this.#mailbox.push({fn: (state: State) => ({ state: fn(state) })});
         this.#scheduler.enqueue(this);
     }
 
     getAndUpdate<R>(fn: (state: State) => { state: State; reply: R }): Promise<R> {
-        if(this.#stopped) {
-            return Promise.reject(new Error(`Agent ${this.id} is stopped`));
-        }
+        if (this.#stopped) return Promise.reject(this.#undeliverable(fn));
         return new Promise((resolve, reject) => {
             const envelope: Envelope<State> = {
                 fn,
